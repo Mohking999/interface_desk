@@ -348,6 +348,23 @@ static void FillRoundBox(HDC hdc, RECT r, int radius, COLORREF fill, bool hasBor
     DeleteObject(brush);
 }
 
+static COLORREF MixColor(COLORREF base, COLORREF accent, int amount) {
+    const int inverse = 255 - amount;
+    return RGB(
+        (GetRValue(base) * inverse + GetRValue(accent) * amount) / 255,
+        (GetGValue(base) * inverse + GetGValue(accent) * amount) / 255,
+        (GetBValue(base) * inverse + GetBValue(accent) * amount) / 255);
+}
+
+static COLORREF GetItemAccent(const CommandItem& item) {
+    if (item.id == L"open-downloads") return RGB(100, 166, 255);
+    if (item.id == L"quick-note") return RGB(255, 184, 92);
+    if (item.id == L"toggle-dnd") return RGB(182, 145, 255);
+    if (item.id == L"weekly-review") return RGB(108, 210, 157);
+    if (item.id == L"interface-exploration") return RGB(255, 126, 151);
+    return RGB(100, 204, 226);
+}
+
 static void DrawLine(HDC hdc, int x1, int y1, int x2, int y2, COLORREF color) {
     HPEN pen = CreatePen(PS_SOLID, 1, color);
     HPEN old = (HPEN)SelectObject(hdc, pen);
@@ -372,9 +389,13 @@ static void PaintWindow(HDC hdc, RECT client) {
 
     RECT panel = { 32, 20, client.right - 32, client.bottom - 52 };
     FillRoundBox(hdc, panel, 20, RGB(28, 28, 28), true, RGB(46, 46, 46));
+    DrawLine(hdc, panel.left + 22, panel.top + 1, panel.right - 22, panel.top + 1, RGB(57, 73, 96));
+
+    RECT searchBox = { panel.left + 14, panel.top + 10, panel.right - 14, panel.top + 52 };
+    FillRoundBox(hdc, searchBox, 12, RGB(34, 36, 42), true, RGB(51, 55, 64));
 
     RECT searchIconRc = { panel.left + 20, panel.top + 16, panel.left + 44, panel.top + 48 };
-    DrawLabel(hdc, L"⌕", searchIconRc, RGB(122, 122, 122), g_fontTitle, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    DrawLabel(hdc, L"⌕", searchIconRc, RGB(132, 169, 220), g_fontTitle, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
     RECT searchTextRc = { panel.left + 50, panel.top + 16, panel.right - 70, panel.top + 48 };
     if (g_state.searchQuery.empty()) {
@@ -397,7 +418,7 @@ static void PaintWindow(HDC hdc, RECT client) {
         RECT tr = { tabX, tabY, tabX + tabWidths[i], tabY + 26 };
         g_state.tabHitBoxes[i] = tr;
         if (g_state.activeTab == i) {
-            FillRoundBox(hdc, tr, 8, RGB(44, 44, 44), true, RGB(58, 58, 58));
+            FillRoundBox(hdc, tr, 8, RGB(38, 50, 69), true, RGB(59, 79, 108));
         }
         DrawLabel(hdc, g_tabs[i], tr, g_state.activeTab == i ? RGB(245, 245, 245) : RGB(128, 128, 128),
             g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
@@ -416,6 +437,8 @@ static void PaintWindow(HDC hdc, RECT client) {
 
     int splitX = panel.left + 530;
     if (g_state.showPreview) {
+        RECT previewSurface = { splitX + 1, bodyTop + 1, panel.right - 1, bodyBottom - 1 };
+        FillRoundBox(hdc, previewSurface, 10, RGB(25, 26, 30));
         DrawLine(hdc, splitX, bodyTop, splitX, bodyBottom, RGB(42, 42, 42));
     }
 
@@ -459,30 +482,35 @@ static void PaintWindow(HDC hdc, RECT client) {
                 bool hovered = (g_state.hoverIndex == i);
 
                 if (selected) {
-                    FillRoundBox(hdc, rowRc, 12, RGB(237, 237, 237));
+                    FillRoundBox(hdc, rowRc, 12, RGB(34, 47, 65), true, RGB(51, 71, 96));
+                    RECT selectionMark = { rowRc.left + 2, rowRc.top + 10, rowRc.left + 5, rowRc.bottom - 10 };
+                    FillRoundBox(hdc, selectionMark, 3, RGB(112, 170, 255));
                 } else if (hovered) {
                     FillRoundBox(hdc, rowRc, 12, RGB(38, 38, 38));
                 }
 
                 RECT iconRc = { rowRc.left + 12, rowRc.top, rowRc.left + 38, rowRc.bottom };
-                DrawLabel(hdc, item.icon.c_str(), iconRc, selected ? RGB(24, 24, 24) : RGB(145, 145, 145),
+                const COLORREF accent = GetItemAccent(item);
+                RECT iconTile = { iconRc.left + 1, rowRc.top + 11, iconRc.right - 1, rowRc.bottom - 11 };
+                FillRoundBox(hdc, iconTile, 7, MixColor(RGB(36, 36, 36), accent, 58));
+                DrawLabel(hdc, item.icon.c_str(), iconRc, selected ? MixColor(RGB(225, 233, 245), accent, 75) : accent,
                     g_fontBody, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
                 RECT titleRc = { rowRc.left + 46, rowRc.top + 7, rowRc.right - 80, rowRc.top + 26 };
-                DrawLabel(hdc, item.title.c_str(), titleRc, selected ? RGB(20, 20, 20) : RGB(237, 237, 237), g_fontBody);
+                DrawLabel(hdc, item.title.c_str(), titleRc, selected ? RGB(242, 246, 252) : RGB(237, 237, 237), g_fontBody);
 
                 RECT subRc = { rowRc.left + 46, rowRc.top + 26, rowRc.right - 80, rowRc.bottom - 6 };
-                DrawLabel(hdc, item.subtitle.c_str(), subRc, selected ? RGB(90, 90, 90) : RGB(120, 120, 120), g_fontSmall);
+                DrawLabel(hdc, item.subtitle.c_str(), subRc, selected ? RGB(177, 192, 211) : RGB(120, 120, 120), g_fontSmall);
 
                 if (item.isBadge) {
                     RECT badgeRc = { rowRc.right - 36, rowRc.top + 14, rowRc.right - 12, rowRc.bottom - 14 };
-                    FillRoundBox(hdc, badgeRc, 6, selected ? RGB(218, 218, 218) : RGB(38, 38, 38),
-                        true, selected ? RGB(195, 195, 195) : RGB(54, 54, 54));
-                    DrawLabel(hdc, item.shortcut.c_str(), badgeRc, selected ? RGB(45, 45, 45) : RGB(140, 140, 140),
+                    FillRoundBox(hdc, badgeRc, 6, selected ? RGB(48, 65, 88) : RGB(38, 38, 38),
+                        true, selected ? RGB(69, 91, 122) : RGB(54, 54, 54));
+                    DrawLabel(hdc, item.shortcut.c_str(), badgeRc, selected ? RGB(200, 216, 237) : RGB(140, 140, 140),
                         g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
                 } else {
                     RECT rightLblRc = { rowRc.right - 90, rowRc.top, rowRc.right - 12, rowRc.bottom };
-                    DrawLabel(hdc, item.shortcut.c_str(), rightLblRc, selected ? RGB(85, 85, 85) : RGB(115, 115, 115),
+                    DrawLabel(hdc, item.shortcut.c_str(), rightLblRc, selected ? RGB(177, 192, 211) : RGB(115, 115, 115),
                         g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
                 }
 
@@ -511,8 +539,11 @@ static void PaintWindow(HDC hdc, RECT client) {
         DrawLabel(hdc, L"Preview", pvHeaderRc, RGB(120, 120, 120), g_fontSmall);
 
         RECT iconBox = { pvLeft, pvTop + 30, pvLeft + 72, pvTop + 102 };
-        FillRoundBox(hdc, iconBox, 16, RGB(36, 36, 36), true, RGB(48, 48, 48));
-        DrawLabel(hdc, sel.icon.c_str(), iconBox, RGB(220, 220, 220), g_fontPreviewIcon, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        const COLORREF accent = GetItemAccent(sel);
+        FillRoundBox(hdc, iconBox, 16, MixColor(RGB(31, 33, 39), accent, 64), true,
+            MixColor(RGB(48, 50, 57), accent, 90));
+        DrawLabel(hdc, sel.icon.c_str(), iconBox, MixColor(RGB(228, 234, 244), accent, 72),
+            g_fontPreviewIcon, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
         RECT pvTitleRc = { pvLeft, pvTop + 114, pvRight, pvTop + 142 };
         DrawLabel(hdc, sel.previewTitle.c_str(), pvTitleRc, RGB(245, 245, 245), g_fontTitle);
@@ -535,13 +566,14 @@ static void PaintWindow(HDC hdc, RECT client) {
 
         RECT mainBtn = { pvLeft, actionTop + 14, pvRight, actionTop + 50 };
         g_state.primaryActionBox = mainBtn;
-        FillRoundBox(hdc, mainBtn, 10, g_state.hoverPrimaryBtn ? RGB(54, 54, 54) : RGB(42, 42, 42), true, RGB(62, 62, 62));
+        FillRoundBox(hdc, mainBtn, 10, g_state.hoverPrimaryBtn ? RGB(55, 91, 143) : RGB(43, 68, 105),
+            true, g_state.hoverPrimaryBtn ? RGB(83, 126, 187) : RGB(61, 91, 135));
 
         RECT mainBtnText = { mainBtn.left + 14, mainBtn.top, mainBtn.right - 34, mainBtn.bottom };
-        DrawLabel(hdc, sel.primaryAction.c_str(), mainBtnText, RGB(245, 245, 245), g_fontSmall);
+        DrawLabel(hdc, sel.primaryAction.c_str(), mainBtnText, RGB(242, 247, 255), g_fontSmall);
 
         RECT mainBtnKey = { mainBtn.right - 30, mainBtn.top, mainBtn.right - 10, mainBtn.bottom };
-        DrawLabel(hdc, L"↵", mainBtnKey, RGB(155, 155, 155), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        DrawLabel(hdc, L"↵", mainBtnKey, RGB(190, 210, 238), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
         RECT copyBtn = { pvLeft, actionTop + 54, pvRight, actionTop + 84 };
         g_state.copyPathBox = copyBtn;
