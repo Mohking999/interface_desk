@@ -4,12 +4,20 @@
 #ifndef _UNICODE
 #define _UNICODE
 #endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 
 #include <windows.h>
 #include <windowsx.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <commdlg.h>
 #include <tchar.h>
+#include <algorithm>
+#include <cstring>
+#include <cwchar>
+#include <set>
 #include <vector>
 #include <string>
 #include <cwctype>
@@ -18,6 +26,7 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 #define HOTKEY_CTRL_K    1001
 #define HOTKEY_ALT_SPACE 1002
@@ -25,13 +34,24 @@
 #define WM_TRAYICON      (WM_USER + 101)
 #define ID_TRAY_SHOW     40001
 #define ID_TRAY_EXIT     40002
+#define IDI_DESKPILOT    101
+
+static constexpr wchar_t kAppName[] = L"DeskPilot";
+
+enum NoteCommand {
+    NOTE_NEW = 41001,
+    NOTE_OPEN,
+    NOTE_SAVE
+};
 
 enum ActionType {
     ACT_OPEN_DOWNLOADS,
-    ACT_QUICK_NOTE,
     ACT_TOGGLE_DND,
     ACT_OPEN_FILE,
-    ACT_OPEN_TERMINAL
+    ACT_OPEN_TERMINAL,
+    ACT_CREATE_NOTE,
+    ACT_OPEN_NOTE,
+    ACT_OPEN_APP
 };
 
 struct CommandItem {
@@ -67,9 +87,14 @@ struct AppState {
     bool hoverCopyBtn = false;
     bool hoverPreviewToggle = false;
     bool hoverEscBtn = false;
+    bool hoverFullscreenBtn = false;
+    bool hoverQuitBtn = false;
+    bool isFullscreen = false;
+    int listScrollOffset = 0;
 
     std::wstring searchQuery;
     std::wstring toastMessage;
+    RECT windowedBounds = {};
 
     std::vector<CommandItem> allItems;
     std::vector<CommandItem> filteredItems;
@@ -80,10 +105,16 @@ struct AppState {
     RECT primaryActionBox = {};
     RECT copyPathBox = {};
     RECT escBox = {};
+    RECT fullscreenBox = {};
+    RECT quitBox = {};
+    RECT listBounds = {};
 };
 
 static AppState g_state;
 static HWND g_hwnd = nullptr;
+static HWND g_notesWindow = nullptr;
+static HWND g_notesEdit = nullptr;
+static std::wstring g_notePath;
 static NOTIFYICONDATAW g_nid = {};
 static const wchar_t* g_tabs[] = { L"All", L"Applications", L"Files", L"Commands" };
 
@@ -121,9 +152,58 @@ static int CountFolderItems(const std::wstring& folderPath) {
     return count;
 }
 
+static std::wstring ToLower(std::wstring value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+        [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+    return value;
+}
+
+static void AddAppsFromFolder(const std::wstring& folder, int depth, std::set<std::wstring>& addedPaths) {
+    if (folder.empty() || depth > 4) return;
+
+    WIN32_FIND_DATAW data = {};
+    HANDLE search = FindFirstFileW((folder + L"\\*").c_str(), &data);
+    if (search == INVALID_HANDLE_VALUE) return;
+
+    do {
+        if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) continue;
+
+        const std::wstring path = folder + L"\\" + data.cFileName;
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            AddAppsFromFolder(path, depth + 1, addedPaths);
+            continue;
+        }
+
+        const size_t extensionStart = path.find_last_of(L'.');
+        const std::wstring extension = extensionStart == std::wstring::npos
+            ? L"" : ToLower(path.substr(extensionStart));
+        if (extension != L".lnk" && extension != L".url") continue;
+
+        const std::wstring normalizedPath = ToLower(path);
+        if (!addedPaths.insert(normalizedPath).second) continue;
+
+        std::wstring title = data.cFileName;
+        title.resize(title.find_last_of(L'.'));
+        if (title.empty()) continue;
+
+        g_state.allItems.push_back({
+            L"app-" + normalizedPath, L"Recent", L"Applications",
+            title, L"Installed application", L"App", false, L">",
+            title, path, L"Application shortcut", L"Start menu app", L"Available",
+            L"Launch " + title, ACT_OPEN_APP
+        });
+    } while (FindNextFileW(search, &data));
+
+    FindClose(search);
+}
+
+static void ShowNotesWindow(bool openExisting, const std::wstring& initialPath = L"");
+
 static void InitItems() {
     std::wstring downloadsPath = GetKnownFolder(FOLDERID_Downloads, L"C:\\Users\\you\\Downloads");
     std::wstring docsPath = GetKnownFolder(FOLDERID_Documents, L"C:\\Users\\you\\Documents");
+    const std::wstring notesPath = docsPath + L"\\DeskPilot Notes";
+    CreateDirectoryW(notesPath.c_str(), nullptr);
     int dlCount = CountFolderItems(downloadsPath);
     std::wstring dlCountStr = std::to_wstring(dlCount) + L" items";
 
@@ -136,11 +216,16 @@ static void InitItems() {
             ACT_OPEN_DOWNLOADS
         },
         {
-            L"quick-note", L"Suggested", L"Commands",
-            L"Create a quick note", L"Capture a thought in a new document", L"⌘ N", false, L"✎",
-            L"Quick Note", docsPath + L"\\QuickNote.md",
-            L"Command", L"Markdown Template", L"Today, 09:15", L"Create Note",
-            ACT_QUICK_NOTE
+            L"new-note", L"Suggested", L"Commands",
+            L"Create a note", L"Write and save a note in DeskPilot", L"Ctrl+N", false, L"+",
+            L"New note", notesPath, L"Note editor", L"Markdown notes", L"Ready", L"Create note",
+            ACT_CREATE_NOTE
+        },
+        {
+            L"open-note", L"Suggested", L"Commands",
+            L"Open a note", L"Read or continue an existing note", L"Ctrl+O", false, L"▤",
+            L"Open a note", notesPath, L"Note library", L"Markdown and text files", L"Ready", L"Choose a note",
+            ACT_OPEN_NOTE
         },
         {
             L"toggle-dnd", L"Suggested", L"Commands",
@@ -171,6 +256,10 @@ static void InitItems() {
             ACT_OPEN_TERMINAL
         }
     };
+
+    std::set<std::wstring> addedPaths;
+    AddAppsFromFolder(GetKnownFolder(FOLDERID_Programs, L""), 0, addedPaths);
+    AddAppsFromFolder(GetKnownFolder(FOLDERID_CommonPrograms, L""), 0, addedPaths);
 }
 
 static void ShowToast(const std::wstring& msg) {
@@ -179,6 +268,298 @@ static void ShowToast(const std::wstring& msg) {
         SetTimer(g_hwnd, TIMER_TOAST, 2200, nullptr);
         InvalidateRect(g_hwnd, nullptr, FALSE);
     }
+}
+
+static std::wstring GetNotesDirectory() {
+    const std::wstring path = GetKnownFolder(FOLDERID_Documents, L".") + L"\\DeskPilot Notes";
+    if (!CreateDirectoryW(path.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        MessageBoxW(g_hwnd, L"Could not create the DeskPilot Notes folder.", kAppName, MB_OK | MB_ICONERROR);
+    }
+    return path;
+}
+
+static void ShowCommonDialogError(HWND owner) {
+    const DWORD error = CommDlgExtendedError();
+    if (error != 0) {
+        const std::wstring message = L"The Windows file dialog failed (error " + std::to_wstring(error) + L").";
+        MessageBoxW(owner, message.c_str(), kAppName, MB_OK | MB_ICONERROR);
+    }
+}
+
+static bool SaveCurrentNote() {
+    if (!g_notesEdit) return false;
+
+    if (g_notePath.empty()) {
+        wchar_t path[MAX_PATH] = {};
+        OPENFILENAMEW dialog = {};
+        dialog.lStructSize = sizeof(dialog);
+        dialog.hwndOwner = g_notesWindow;
+        dialog.lpstrFilter = L"Markdown and text notes\0*.md;*.txt\0All files\0*.*\0";
+        dialog.lpstrFile = path;
+        dialog.nMaxFile = MAX_PATH;
+        dialog.lpstrDefExt = L"md";
+        const std::wstring initialDirectory = GetNotesDirectory();
+        dialog.lpstrInitialDir = initialDirectory.c_str();
+        dialog.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
+        if (!GetSaveFileNameW(&dialog)) {
+            ShowCommonDialogError(g_notesWindow);
+            return false;
+        }
+        g_notePath = path;
+    }
+
+    const int charCount = GetWindowTextLengthW(g_notesEdit);
+    std::wstring content(static_cast<size_t>(charCount) + 1, L'\0');
+    GetWindowTextW(g_notesEdit, content.data(), charCount + 1);
+    content.resize(static_cast<size_t>(charCount));
+
+    const int byteCount = WideCharToMultiByte(CP_UTF8, 0, content.c_str(), charCount, nullptr, 0, nullptr, nullptr);
+    if (charCount > 0 && byteCount == 0) {
+        MessageBoxW(g_notesWindow, L"Could not encode this note as UTF-8.", kAppName, MB_OK | MB_ICONERROR);
+        return false;
+    }
+    std::string utf8(static_cast<size_t>(byteCount), '\0');
+    if (byteCount > 0) {
+        WideCharToMultiByte(CP_UTF8, 0, content.c_str(), charCount, utf8.data(), byteCount, nullptr, nullptr);
+    }
+
+    HANDLE file = CreateFileW(g_notePath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        MessageBoxW(g_notesWindow, L"Could not save this note.", kAppName, MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    DWORD written = 0;
+    const bool saved = utf8.empty() || WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    CloseHandle(file);
+    if (!saved || written != static_cast<DWORD>(utf8.size())) {
+        MessageBoxW(g_notesWindow, L"Could not write the complete note to disk.", kAppName, MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    SendMessageW(g_notesEdit, EM_SETMODIFY, FALSE, 0);
+    const std::wstring title = g_notePath.substr(g_notePath.find_last_of(L"\\/") + 1) + L" - DeskPilot";
+    SetWindowTextW(g_notesWindow, title.c_str());
+    ShowToast(L"Note saved");
+    return true;
+}
+
+static bool LoadNoteFile(const std::wstring& path) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        MessageBoxW(g_notesWindow ? g_notesWindow : g_hwnd, L"Could not open this note.", kAppName, MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(file, &size)) {
+        CloseHandle(file);
+        MessageBoxW(g_notesWindow, L"Could not determine the note's size.", kAppName, MB_OK | MB_ICONERROR);
+        return false;
+    }
+    if (size.QuadPart > 16 * 1024 * 1024) {
+        CloseHandle(file);
+        MessageBoxW(g_notesWindow, L"This note is too large to open (maximum 16 MB).", kAppName, MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    std::string bytes(static_cast<size_t>(size.QuadPart), '\0');
+    DWORD read = 0;
+    const bool readOk = bytes.empty() || ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr);
+    CloseHandle(file);
+    if (!readOk || read != static_cast<DWORD>(bytes.size())) {
+        MessageBoxW(g_notesWindow, L"Could not read the complete note.", kAppName, MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    if (bytes.size() >= 2 && static_cast<unsigned char>(bytes[0]) == 0xFF &&
+        static_cast<unsigned char>(bytes[1]) == 0xFE) {
+        const size_t wideBytes = bytes.size() - 2;
+        if (wideBytes % sizeof(wchar_t) != 0) {
+            MessageBoxW(g_notesWindow, L"This UTF-16 note is incomplete.", kAppName, MB_OK | MB_ICONERROR);
+            return false;
+        }
+        std::wstring content(wideBytes / sizeof(wchar_t), L'\0');
+        if (!content.empty()) memcpy(content.data(), bytes.data() + 2, wideBytes);
+        if (g_notesEdit) {
+            SetWindowTextW(g_notesEdit, content.c_str());
+            SendMessageW(g_notesEdit, EM_SETMODIFY, FALSE, 0);
+        }
+        g_notePath = path;
+        if (g_notesWindow) {
+            const std::wstring title = path.substr(path.find_last_of(L"\\/") + 1) + L" - DeskPilot";
+            SetWindowTextW(g_notesWindow, title.c_str());
+        }
+        return true;
+    }
+
+    const int skip = bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF &&
+        static_cast<unsigned char>(bytes[1]) == 0xBB && static_cast<unsigned char>(bytes[2]) == 0xBF ? 3 : 0;
+    const int wideCount = MultiByteToWideChar(CP_UTF8, 0, bytes.data() + skip,
+        static_cast<int>(bytes.size()) - skip, nullptr, 0);
+    if (wideCount == 0 && bytes.size() > static_cast<size_t>(skip)) {
+        MessageBoxW(g_notesWindow, L"This note is not valid UTF-8 text.", kAppName, MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    std::wstring content(static_cast<size_t>(wideCount), L'\0');
+    if (wideCount > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, bytes.data() + skip,
+            static_cast<int>(bytes.size()) - skip, content.data(), wideCount);
+    }
+
+    if (g_notesEdit) {
+        SetWindowTextW(g_notesEdit, content.c_str());
+        SendMessageW(g_notesEdit, EM_SETMODIFY, FALSE, 0);
+    }
+    g_notePath = path;
+    if (g_notesWindow) {
+        const std::wstring title = path.substr(path.find_last_of(L"\\/") + 1) + L" - DeskPilot";
+        SetWindowTextW(g_notesWindow, title.c_str());
+    }
+    return true;
+}
+
+static bool ChooseAndOpenNote() {
+    wchar_t path[MAX_PATH] = {};
+    OPENFILENAMEW dialog = {};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = g_notesWindow ? g_notesWindow : g_hwnd;
+    dialog.lpstrFilter = L"Text notes\0*.md;*.markdown;*.txt\0All files\0*.*\0";
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = MAX_PATH;
+    const std::wstring initialDirectory = GetNotesDirectory();
+    dialog.lpstrInitialDir = initialDirectory.c_str();
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (!GetOpenFileNameW(&dialog)) {
+        ShowCommonDialogError(dialog.hwndOwner);
+        return false;
+    }
+    return LoadNoteFile(path);
+}
+
+static LRESULT CALLBACK NotesWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_CREATE: {
+        CreateWindowExW(0, L"BUTTON", L"New", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            12, 10, 76, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(NOTE_NEW)), nullptr, nullptr);
+        CreateWindowExW(0, L"BUTTON", L"Open", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            96, 10, 76, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(NOTE_OPEN)), nullptr, nullptr);
+        CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            180, 10, 76, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(NOTE_SAVE)), nullptr, nullptr);
+        g_notesEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
+            12, 50, 760, 500, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!g_notesEdit) return -1;
+        SendMessageW(g_notesEdit, EM_SETLIMITTEXT, 16 * 1024 * 1024, 0);
+        SendMessageW(g_notesEdit, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
+        return 0;
+    }
+    case WM_SIZE: {
+        const int width = LOWORD(lParam);
+        const int height = HIWORD(lParam);
+        if (g_notesEdit) MoveWindow(g_notesEdit, 12, 50, width - 24, height - 62, TRUE);
+        return 0;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case NOTE_NEW:
+            if (g_notesEdit && SendMessageW(g_notesEdit, EM_GETMODIFY, 0, 0) &&
+                MessageBoxW(hwnd, L"Discard the unsaved note?", kAppName, MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
+            g_notePath.clear();
+            SetWindowTextW(g_notesEdit, L"");
+            SendMessageW(g_notesEdit, EM_SETMODIFY, FALSE, 0);
+            SetWindowTextW(hwnd, L"New note - DeskPilot");
+            SetFocus(g_notesEdit);
+            return 0;
+        case NOTE_OPEN:
+            if (g_notesEdit && SendMessageW(g_notesEdit, EM_GETMODIFY, 0, 0) &&
+                MessageBoxW(hwnd, L"Discard the unsaved note?", kAppName, MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
+            ChooseAndOpenNote();
+            return 0;
+        case NOTE_SAVE:
+            SaveCurrentNote();
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        if (g_notesEdit && SendMessageW(g_notesEdit, EM_GETMODIFY, 0, 0) &&
+            MessageBoxW(hwnd, L"Close without saving your changes?", kAppName, MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_notesEdit = nullptr;
+        g_notesWindow = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+static void ShowNotesWindow(bool openExisting, const std::wstring& initialPath) {
+    if (!g_notesWindow) {
+        g_notesWindow = CreateWindowExW(WS_EX_APPWINDOW, L"DeskPilotNotes", L"New note - DeskPilot",
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 820, 620,
+            g_hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!g_notesWindow) {
+            MessageBoxW(g_hwnd, L"Could not open the notes window.", kAppName, MB_OK | MB_ICONERROR);
+            return;
+        }
+    }
+    ShowWindow(g_notesWindow, SW_SHOW);
+    SetForegroundWindow(g_notesWindow);
+    if (g_notesEdit && !openExisting && initialPath.empty() &&
+        SendMessageW(g_notesEdit, EM_GETMODIFY, 0, 0) &&
+        MessageBoxW(g_notesWindow, L"Discard the unsaved note?", kAppName, MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    if (!initialPath.empty()) LoadNoteFile(initialPath);
+    else if (openExisting) {
+        if (g_notesEdit && SendMessageW(g_notesEdit, EM_GETMODIFY, 0, 0) &&
+            MessageBoxW(g_notesWindow, L"Discard the unsaved note?", kAppName, MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+        ChooseAndOpenNote();
+    } else {
+        g_notePath.clear();
+        SetWindowTextW(g_notesEdit, L"");
+        SendMessageW(g_notesEdit, EM_SETMODIFY, FALSE, 0);
+    }
+    SetFocus(g_notesEdit);
+}
+
+static void ToggleFullscreen() {
+    if (!g_hwnd) return;
+    if (g_state.isFullscreen) {
+        SetWindowPos(g_hwnd, nullptr, g_state.windowedBounds.left, g_state.windowedBounds.top,
+            g_state.windowedBounds.right - g_state.windowedBounds.left,
+            g_state.windowedBounds.bottom - g_state.windowedBounds.top, SWP_NOZORDER | SWP_NOACTIVATE);
+        const int width = g_state.windowedBounds.right - g_state.windowedBounds.left;
+        const int height = g_state.windowedBounds.bottom - g_state.windowedBounds.top;
+        SetWindowRgn(g_hwnd, CreateRoundRectRgn(0, 0, width + 1, height + 1, 24, 24), TRUE);
+        g_state.isFullscreen = false;
+    } else {
+        GetWindowRect(g_hwnd, &g_state.windowedBounds);
+        MONITORINFO monitor = {};
+        monitor.cbSize = sizeof(monitor);
+        if (GetMonitorInfoW(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) {
+            SetWindowPos(g_hwnd, nullptr, monitor.rcMonitor.left, monitor.rcMonitor.top,
+                monitor.rcMonitor.right - monitor.rcMonitor.left,
+                monitor.rcMonitor.bottom - monitor.rcMonitor.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            SetWindowRgn(g_hwnd, nullptr, TRUE);
+            g_state.isFullscreen = true;
+        }
+    }
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+static bool RegisterNotesWindowClass(HINSTANCE instance) {
+    WNDCLASSEXW noteClass = {};
+    noteClass.cbSize = sizeof(noteClass);
+    noteClass.lpfnWndProc = NotesWindowProc;
+    noteClass.hInstance = instance;
+    noteClass.hCursor = LoadCursorW(nullptr, IDC_IBEAM);
+    noteClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    noteClass.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_DESKPILOT));
+    noteClass.lpszClassName = L"DeskPilotNotes";
+    return RegisterClassExW(&noteClass) != 0;
 }
 
 static bool CopyTextToClipboard(HWND hwnd, const std::wstring& text) {
@@ -232,7 +613,76 @@ static void RebuildFilteredList() {
     if (g_state.selectedIndex >= (int)g_state.filteredItems.size()) {
         g_state.selectedIndex = g_state.filteredItems.empty() ? 0 : (int)g_state.filteredItems.size() - 1;
     }
+    g_state.listScrollOffset = 0;
     g_state.hoverIndex = -1;
+}
+
+static int GetVisibleListHeight() {
+    if (!g_hwnd) return 0;
+    RECT client = {};
+    GetClientRect(g_hwnd, &client);
+    const int bodyTop = 20 + 92;
+    const int bodyBottom = client.bottom - 52 - 40;
+    return std::max(0, bodyBottom - (bodyTop + 12));
+}
+
+static int GetListContentHeight() {
+    const wchar_t* sections[] = { L"Suggested", L"Recent" };
+    int height = 0;
+    for (const wchar_t* section : sections) {
+        int itemCount = 0;
+        for (const auto& item : g_state.filteredItems) {
+            if (item.section == section) ++itemCount;
+        }
+        if (itemCount > 0) height += 24 + itemCount * 52 + 8;
+    }
+    return height;
+}
+
+static int GetMaxListScrollOffset() {
+    return std::max(0, GetListContentHeight() - GetVisibleListHeight());
+}
+
+static void EnsureSelectionVisible() {
+    if (g_state.filteredItems.empty()) {
+        g_state.listScrollOffset = 0;
+        return;
+    }
+
+    const wchar_t* sections[] = { L"Suggested", L"Recent" };
+    int rowTop = 0;
+    int selectedTop = 0;
+    bool found = false;
+    for (const wchar_t* section : sections) {
+        bool hasItems = false;
+        for (const auto& item : g_state.filteredItems) {
+            if (item.section == section) {
+                hasItems = true;
+                break;
+            }
+        }
+        if (!hasItems) continue;
+        rowTop += 24;
+        for (size_t i = 0; i < g_state.filteredItems.size(); ++i) {
+            if (g_state.filteredItems[i].section != section) continue;
+            if (static_cast<int>(i) == g_state.selectedIndex) {
+                selectedTop = rowTop;
+                found = true;
+                break;
+            }
+            rowTop += 52;
+        }
+        if (found) break;
+        rowTop += 8;
+    }
+
+    const int visibleHeight = GetVisibleListHeight();
+    if (found && selectedTop < g_state.listScrollOffset) {
+        g_state.listScrollOffset = selectedTop;
+    } else if (found && selectedTop + 50 > g_state.listScrollOffset + visibleHeight) {
+        g_state.listScrollOffset = selectedTop + 50 - visibleHeight;
+    }
+    g_state.listScrollOffset = std::min(g_state.listScrollOffset, GetMaxListScrollOffset());
 }
 
 static void ExecuteSelectedItem() {
@@ -245,21 +695,14 @@ static void ExecuteSelectedItem() {
         ShowToast(L"Opened Downloads folder");
         break;
 
-    case ACT_QUICK_NOTE: {
-        HANDLE hFile = CreateFileW(sel.previewPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
-            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            if (GetLastError() != ERROR_ALREADY_EXISTS) {
-                const char* header = "# Quick Note\r\n\r\nCapture your thoughts here...\r\n";
-                DWORD written = 0;
-                WriteFile(hFile, header, (DWORD)strlen(header), &written, nullptr);
-            }
-            CloseHandle(hFile);
-        }
-        ShellExecuteW(g_hwnd, L"open", L"notepad.exe", sel.previewPath.c_str(), nullptr, SW_SHOWNORMAL);
-        ShowToast(L"Launched Quick Note in Notepad");
+    case ACT_CREATE_NOTE:
+        ShowNotesWindow(false);
+        ShowToast(L"New note");
         break;
-    }
+
+    case ACT_OPEN_NOTE:
+        ShowNotesWindow(true);
+        break;
 
     case ACT_TOGGLE_DND:
         g_state.dndEnabled = !g_state.dndEnabled;
@@ -290,6 +733,16 @@ static void ExecuteSelectedItem() {
             ShellExecuteW(g_hwnd, L"open", L"powershell.exe", nullptr, nullptr, SW_SHOWNORMAL);
         }
         ShowToast(L"Launched Terminal");
+        break;
+    }
+
+    case ACT_OPEN_APP: {
+        HINSTANCE result = ShellExecuteW(g_hwnd, L"open", sel.previewPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if ((INT_PTR)result <= 32) {
+            MessageBoxW(g_hwnd, (L"Could not launch " + sel.title + L".").c_str(), kAppName, MB_OK | MB_ICONERROR);
+        } else {
+            ShowToast(L"Launched " + sel.title);
+        }
         break;
     }
     }
@@ -358,7 +811,7 @@ static COLORREF MixColor(COLORREF base, COLORREF accent, int amount) {
 
 static COLORREF GetItemAccent(const CommandItem& item) {
     if (item.id == L"open-downloads") return RGB(100, 166, 255);
-    if (item.id == L"quick-note") return RGB(255, 184, 92);
+    if (item.id == L"new-note" || item.id == L"open-note") return RGB(255, 184, 92);
     if (item.id == L"toggle-dnd") return RGB(182, 145, 255);
     if (item.id == L"weekly-review") return RGB(108, 210, 157);
     if (item.id == L"interface-exploration") return RGB(255, 126, 151);
@@ -391,13 +844,13 @@ static void PaintWindow(HDC hdc, RECT client) {
     FillRoundBox(hdc, panel, 20, RGB(28, 28, 28), true, RGB(46, 46, 46));
     DrawLine(hdc, panel.left + 22, panel.top + 1, panel.right - 22, panel.top + 1, RGB(57, 73, 96));
 
-    RECT searchBox = { panel.left + 14, panel.top + 10, panel.right - 14, panel.top + 52 };
+    RECT searchBox = { panel.left + 14, panel.top + 10, panel.right - 104, panel.top + 52 };
     FillRoundBox(hdc, searchBox, 12, RGB(34, 36, 42), true, RGB(51, 55, 64));
 
     RECT searchIconRc = { panel.left + 20, panel.top + 16, panel.left + 44, panel.top + 48 };
     DrawLabel(hdc, L"⌕", searchIconRc, RGB(132, 169, 220), g_fontTitle, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
-    RECT searchTextRc = { panel.left + 50, panel.top + 16, panel.right - 70, panel.top + 48 };
+    RECT searchTextRc = { panel.left + 50, panel.top + 16, panel.right - 160, panel.top + 48 };
     if (g_state.searchQuery.empty()) {
         DrawLabel(hdc, L"Search apps, files, and commands...", searchTextRc, RGB(115, 115, 115), g_fontSearch);
     } else {
@@ -405,10 +858,25 @@ static void PaintWindow(HDC hdc, RECT client) {
         DrawLabel(hdc, displayQuery.c_str(), searchTextRc, RGB(242, 242, 242), g_fontSearch);
     }
 
-    RECT escRect = { panel.right - 56, panel.top + 20, panel.right - 20, panel.top + 42 };
+    RECT escRect = { panel.right - 148, panel.top + 20, panel.right - 108, panel.top + 42 };
     g_state.escBox = escRect;
     FillRoundBox(hdc, escRect, 6, g_state.hoverEscBtn ? RGB(52, 52, 52) : RGB(38, 38, 38), true, RGB(58, 58, 58));
     DrawLabel(hdc, L"esc", escRect, RGB(155, 155, 155), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
+    RECT fullscreenBox = { panel.right - 96, panel.top + 16, panel.right - 60, panel.top + 46 };
+    g_state.fullscreenBox = fullscreenBox;
+    FillRoundBox(hdc, fullscreenBox, 7, g_state.hoverFullscreenBtn ? RGB(48, 54, 66) : RGB(35, 37, 42),
+        true, RGB(55, 58, 66));
+    DrawLabel(hdc, g_state.isFullscreen ? L"❐" : L"□", fullscreenBox,
+        g_state.hoverFullscreenBtn ? RGB(210, 224, 247) : RGB(147, 162, 184),
+        g_fontBody, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
+    RECT quitBox = { panel.right - 50, panel.top + 16, panel.right - 14, panel.top + 46 };
+    g_state.quitBox = quitBox;
+    FillRoundBox(hdc, quitBox, 7, g_state.hoverQuitBtn ? RGB(94, 43, 49) : RGB(43, 35, 38),
+        true, g_state.hoverQuitBtn ? RGB(139, 66, 73) : RGB(65, 48, 52));
+    DrawLabel(hdc, L"×", quitBox, g_state.hoverQuitBtn ? RGB(255, 205, 207) : RGB(203, 146, 151),
+        g_fontBody, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
     int tabY = panel.top + 56;
     int tabX = panel.left + 20;
@@ -443,9 +911,13 @@ static void PaintWindow(HDC hdc, RECT client) {
     }
 
     g_state.rowHitBoxes.clear();
-    int curY = bodyTop + 12;
     int listLeft = panel.left + 12;
     int listRight = (g_state.showPreview ? splitX : panel.right) - 12;
+    const int listTop = bodyTop + 12;
+    g_state.listBounds = { listLeft, bodyTop, listRight, bodyBottom };
+    int curY = listTop - g_state.listScrollOffset;
+    const int listDcState = SaveDC(hdc);
+    if (listDcState != 0) IntersectClipRect(hdc, listLeft, bodyTop, listRight, bodyBottom);
 
     if (g_state.filteredItems.empty()) {
         RECT emptyRc = { listLeft, bodyTop + 80, listRight, bodyTop + 140 };
@@ -476,7 +948,9 @@ static void PaintWindow(HDC hdc, RECT client) {
                 if (item.section != sections[s]) continue;
 
                 RECT rowRc = { listLeft, curY, listRight, curY + 50 };
-                g_state.rowHitBoxes.push_back({ i, rowRc });
+                if (rowRc.bottom > bodyTop && rowRc.top < bodyBottom) {
+                    g_state.rowHitBoxes.push_back({ i, rowRc });
+                }
 
                 bool selected = (g_state.selectedIndex == i);
                 bool hovered = (g_state.hoverIndex == i);
@@ -519,6 +993,21 @@ static void PaintWindow(HDC hdc, RECT client) {
             curY += 8;
         }
     }
+
+    const int contentHeight = GetListContentHeight();
+    const int visibleHeight = bodyBottom - listTop;
+    if (contentHeight > visibleHeight && visibleHeight > 0) {
+        RECT track = { listRight - 5, bodyTop + 8, listRight - 2, bodyBottom - 8 };
+        FillRoundBox(hdc, track, 3, RGB(34, 35, 39));
+        const int trackHeight = track.bottom - track.top;
+        const int thumbHeight = std::max(24, trackHeight * visibleHeight / contentHeight);
+        const int thumbTravel = trackHeight - thumbHeight;
+        const int maxScroll = contentHeight - visibleHeight;
+        const int thumbTop = track.top + (thumbTravel * g_state.listScrollOffset / maxScroll);
+        RECT thumb = { track.left, thumbTop, track.right, thumbTop + thumbHeight };
+        FillRoundBox(hdc, thumb, 3, RGB(83, 96, 116));
+    }
+    if (listDcState != 0) RestoreDC(hdc, listDcState);
 
     int pvIconRight = panel.right - 18;
     RECT pvToggleRc = { pvIconRight - 24, bodyTop + 12, pvIconRight, bodyTop + 34 };
@@ -635,7 +1124,7 @@ static void PaintWindow(HDC hdc, RECT client) {
     DrawLabel(hdc, L"from anywhere.", capAfter, RGB(115, 115, 115), g_fontSmall);
 
     RECT capRight = { panel.right - 160, capY, panel.right - 4, capY + 24 };
-    DrawLabel(hdc, L"Personal workspace", capRight, RGB(115, 115, 115), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
+    DrawLabel(hdc, L"DeskPilot", capRight, RGB(130, 148, 175), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
 }
 
 static int HitTestRow(POINT pt) {
@@ -669,8 +1158,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_nid.uID = 1;
         g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         g_nid.uCallbackMessage = WM_TRAYICON;
-        g_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
-        wcscpy_s(g_nid.szTip, L"Command Palette (Ctrl+K)");
+        g_nid.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_DESKPILOT));
+        wcscpy_s(g_nid.szTip, L"DeskPilot (Ctrl+K)");
         Shell_NotifyIconW(NIM_ADD, &g_nid);
 
         RegisterHotKey(hwnd, HOTKEY_CTRL_K, MOD_CONTROL, 'K');
@@ -684,9 +1173,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SetForegroundWindow(hwnd);
 
             HMENU hMenu = CreatePopupMenu();
-            AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"Afficher / Masquer (Ctrl+K)");
+            AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"Show / Hide DeskPilot (Ctrl+K)");
             AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Quitter");
+            AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Quit");
 
             TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, nullptr);
             DestroyMenu(hMenu);
@@ -703,7 +1192,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SetFocus(hwnd);
             }
         } else if (LOWORD(wParam) == ID_TRAY_EXIT) {
-            PostQuitMessage(0);
+            DestroyWindow(hwnd);
         }
         return 0;
 
@@ -725,6 +1214,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_state.toastMessage.clear();
             InvalidateRect(hwnd, nullptr, FALSE);
         }
+        return 0;
+
+    case WM_SIZE:
+        EnsureSelectionVisible();
         return 0;
 
     case WM_ERASEBKGND:
@@ -762,24 +1255,55 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         bool hCopy = PtInRect(&g_state.copyPathBox, pt) != 0;
         bool hToggle = PtInRect(&g_state.previewToggleBox, pt) != 0;
         bool hEsc = PtInRect(&g_state.escBox, pt) != 0;
+        bool hFullscreen = PtInRect(&g_state.fullscreenBox, pt) != 0;
+        bool hQuit = PtInRect(&g_state.quitBox, pt) != 0;
 
         if (rowIdx != g_state.hoverIndex ||
             hPrimary != g_state.hoverPrimaryBtn ||
             hCopy != g_state.hoverCopyBtn ||
             hToggle != g_state.hoverPreviewToggle ||
-            hEsc != g_state.hoverEscBtn) {
+            hEsc != g_state.hoverEscBtn ||
+            hFullscreen != g_state.hoverFullscreenBtn ||
+            hQuit != g_state.hoverQuitBtn) {
             g_state.hoverIndex = rowIdx;
             g_state.hoverPrimaryBtn = hPrimary;
             g_state.hoverCopyBtn = hCopy;
             g_state.hoverPreviewToggle = hToggle;
             g_state.hoverEscBtn = hEsc;
+            g_state.hoverFullscreenBtn = hFullscreen;
+            g_state.hoverQuitBtn = hQuit;
             InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+
+    case WM_MOUSEWHEEL: {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ScreenToClient(hwnd, &pt);
+        if (PtInRect(&g_state.listBounds, pt)) {
+            const int direction = GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1;
+            const int nextOffset = std::clamp(g_state.listScrollOffset + direction * 52,
+                0, GetMaxListScrollOffset());
+            if (nextOffset != g_state.listScrollOffset) {
+                g_state.listScrollOffset = nextOffset;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
         }
         return 0;
     }
 
     case WM_LBUTTONDOWN: {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+
+        if (PtInRect(&g_state.quitBox, pt)) {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            return 0;
+        }
+
+        if (PtInRect(&g_state.fullscreenBox, pt)) {
+            ToggleFullscreen();
+            return 0;
+        }
 
         if (PtInRect(&g_state.escBox, pt)) {
             if (!g_state.searchQuery.empty()) {
@@ -870,13 +1394,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         if (ctrlDown && wParam == 'N') {
-            for (size_t i = 0; i < g_state.filteredItems.size(); ++i) {
-                if (g_state.filteredItems[i].actionType == ACT_QUICK_NOTE) {
-                    g_state.selectedIndex = (int)i;
-                    ExecuteSelectedItem();
-                    return 0;
-                }
-            }
+            ShowNotesWindow(false);
+            return 0;
+        }
+
+        if (ctrlDown && wParam == 'O') {
+            ShowNotesWindow(true);
+            return 0;
+        }
+
+        if (wParam == VK_F11) {
+            ToggleFullscreen();
+            return 0;
         }
 
         if (ctrlDown && wParam == 'P') {
@@ -888,12 +1417,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (wParam == VK_UP && !g_state.filteredItems.empty()) {
             int n = (int)g_state.filteredItems.size();
             g_state.selectedIndex = (g_state.selectedIndex - 1 + n) % n;
+            EnsureSelectionVisible();
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         if (wParam == VK_DOWN && !g_state.filteredItems.empty()) {
             int n = (int)g_state.filteredItems.size();
             g_state.selectedIndex = (g_state.selectedIndex + 1) % n;
+            EnsureSelectionVisible();
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -940,16 +1471,22 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE, LPTSTR, int nCmdShow) {
     SetProcessDPIAware();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 
-    const wchar_t CLASS_NAME[] = L"CommandPaletteWin32";
+    const wchar_t CLASS_NAME[] = L"DeskPilotMain";
 
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(WNDCLASSEXW);
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_DESKPILOT));
+    wc.hIconSm = wc.hIcon;
     wc.hbrBackground = nullptr;
     wc.lpszClassName = CLASS_NAME;
-    RegisterClassExW(&wc);
+    if (!RegisterClassExW(&wc) || !RegisterNotesWindowClass(hInstance)) {
+        MessageBoxW(nullptr, L"Could not register the DeskPilot window classes.", kAppName, MB_OK | MB_ICONERROR);
+        CoUninitialize();
+        return 1;
+    }
 
     int winWidth = 910;
     int winHeight = 576;
@@ -962,7 +1499,7 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE, LPTSTR, int nCmdShow) {
     HWND hwnd = CreateWindowExW(
         WS_EX_APPWINDOW,
         CLASS_NAME,
-        L"Command Palette",
+        kAppName,
         WS_POPUP | WS_VISIBLE,
         posX, posY, winWidth, winHeight,
         nullptr, nullptr, hInstance, nullptr);

@@ -1,4 +1,4 @@
-name: Build Win32 app
+name: Build DeskPilot
 
 on:
   push:
@@ -16,20 +16,29 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Set up MSVC
-        uses: ilammy/msvc-dev-cmd@v1
+      - name: Configure CMake
+        run: cmake -S . -B build -A x64
 
-      - name: Compile Win32 application
-        shell: cmd
-        run: >-
-          cl /nologo /EHsc /std:c++17 /DUNICODE /D_UNICODE /utf-8 /W4 /O2
-          command_palette_win32.cpp
-          /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib
-          /OUT:command_palette_win32.exe
+      - name: Build DeskPilot
+        run: cmake --build build --config Release
 
-      - name: Upload executable
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          & $iscc installer.iss
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload DeskPilot and setup
         uses: actions/upload-artifact@v4
         with:
-          name: command-palette-win32
-          path: command_palette_win32.exe
+          name: deskpilot-windows
+          path: |
+            build/Release/DeskPilot.exe
+            build/installer/DeskPilot-Setup.exe
           if-no-files-found: error

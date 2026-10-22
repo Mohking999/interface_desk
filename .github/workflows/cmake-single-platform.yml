@@ -1,4 +1,4 @@
-name: Build Win32 app
+name: Build DeskPilot
 
 on:
   push:
@@ -18,12 +18,26 @@ jobs:
       - name: Configure CMake
         run: cmake -S . -B build -A x64
 
-      - name: Build Win32 application
+      - name: Build DeskPilot
         run: cmake --build build --config Release
 
-      - name: Upload executable
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          & $iscc installer.iss
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload DeskPilot and setup
         uses: actions/upload-artifact@v4
         with:
-          name: command-palette-win32
-          path: build/Release/command_palette.exe
+          name: deskpilot-windows
+          path: |
+            build/Release/DeskPilot.exe
+            build/installer/DeskPilot-Setup.exe
           if-no-files-found: error
