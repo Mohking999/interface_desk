@@ -21,6 +21,7 @@
 #include <vector>
 #include <string>
 #include <cwctype>
+#include "deskpilot_version.h"
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -34,9 +35,10 @@
 #define WM_TRAYICON      (WM_USER + 101)
 #define ID_TRAY_SHOW     40001
 #define ID_TRAY_EXIT     40002
-#define IDI_DESKPILOT    101
+#define ID_TRAY_ABOUT    40003
 
 static constexpr wchar_t kAppName[] = L"DeskPilot";
+static constexpr wchar_t kAppVersion[] = L"DeskPilot v" DESKPILOT_VERSION_W;
 
 enum NoteCommand {
     NOTE_NEW = 41001,
@@ -1124,7 +1126,7 @@ static void PaintWindow(HDC hdc, RECT client) {
     DrawLabel(hdc, L"from anywhere.", capAfter, RGB(115, 115, 115), g_fontSmall);
 
     RECT capRight = { panel.right - 160, capY, panel.right - 4, capY + 24 };
-    DrawLabel(hdc, L"DeskPilot", capRight, RGB(130, 148, 175), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
+    DrawLabel(hdc, kAppVersion, capRight, RGB(130, 148, 175), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
 }
 
 static int HitTestRow(POINT pt) {
@@ -1174,6 +1176,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             HMENU hMenu = CreatePopupMenu();
             AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"Show / Hide DeskPilot (Ctrl+K)");
+            AppendMenuW(hMenu, MF_STRING, ID_TRAY_ABOUT, L"About DeskPilot");
             AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Quit");
 
@@ -1193,6 +1196,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
         } else if (LOWORD(wParam) == ID_TRAY_EXIT) {
             DestroyWindow(hwnd);
+        } else if (LOWORD(wParam) == ID_TRAY_ABOUT) {
+            const std::wstring about = L"DeskPilot v" DESKPILOT_VERSION_W
+                L"\nA desktop command palette and notes app.";
+            MessageBoxW(hwnd, about.c_str(), L"About DeskPilot", MB_OK | MB_ICONINFORMATION);
         }
         return 0;
 
@@ -1499,7 +1506,7 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE, LPTSTR, int nCmdShow) {
     HWND hwnd = CreateWindowExW(
         WS_EX_APPWINDOW,
         CLASS_NAME,
-        kAppName,
+        kAppVersion,
         WS_POPUP | WS_VISIBLE,
         posX, posY, winWidth, winHeight,
         nullptr, nullptr, hInstance, nullptr);

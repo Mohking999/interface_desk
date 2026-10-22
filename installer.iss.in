@@ -1,5 +1,5 @@
-#define AppVersion "1.0.0"
-#define SourcePath "build\Release"
+#define AppVersion "@PROJECT_VERSION@"
+#define SourcePath "@CMAKE_CURRENT_BINARY_DIR@/Release"
 
 [Setup]
 AppId={{B937D33A-0E31-4C67-96A4-B39C0E6C1841}
@@ -9,9 +9,9 @@ AppPublisher=DeskPilot
 DefaultDirName={autopf}\DeskPilot
 DefaultGroupName=DeskPilot
 UninstallDisplayIcon={app}\DeskPilot.exe
-SetupIconFile=deskpilot.ico
-OutputDir=build\installer
-OutputBaseFilename=DeskPilot-Setup
+SetupIconFile="@CMAKE_CURRENT_SOURCE_DIR@/deskpilot.ico"
+OutputDir="@CMAKE_CURRENT_BINARY_DIR@/installer"
+OutputBaseFilename=DeskPilot-Setup-{#AppVersion}
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=admin

@@ -29,7 +29,7 @@ jobs:
           if (!(Test-Path $iscc)) {
             choco install innosetup --no-progress -y
           }
-          & $iscc installer.iss
+          & $iscc build\installer.iss
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
@@ -40,5 +40,5 @@ jobs:
           name: deskpilot-windows
           path: |
             build/Release/DeskPilot.exe
-            build/installer/DeskPilot-Setup.exe
+            build/installer/DeskPilot-Setup-*.exe
           if-no-files-found: error
