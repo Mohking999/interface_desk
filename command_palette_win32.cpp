@@ -7,40 +7,53 @@
 
 #include <windows.h>
 #include <windowsx.h>
+#include <shlobj.h>
+#include <shellapi.h>
 #include <tchar.h>
 #include <vector>
 #include <string>
 #include <cwctype>
 
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "ole32.lib")
+
+#define HOTKEY_CTRL_K    1001
+#define HOTKEY_ALT_SPACE 1002
+#define TIMER_TOAST      2001
+#define WM_TRAYICON      (WM_USER + 101)
+#define ID_TRAY_SHOW     40001
+#define ID_TRAY_EXIT     40002
+
+enum ActionType {
+    ACT_OPEN_DOWNLOADS,
+    ACT_QUICK_NOTE,
+    ACT_TOGGLE_DND,
+    ACT_OPEN_FILE,
+    ACT_OPEN_TERMINAL
+};
+
 struct CommandItem {
-    const wchar_t* section;      // "Suggested" or "Recent"
-    const wchar_t* category;     // "Commands", "Files", "Applications"
-    const wchar_t* title;
-    const wchar_t* subtitle;
-    const wchar_t* shortcut;
+    std::wstring id;
+    std::wstring section;
+    std::wstring category;
+    std::wstring title;
+    std::wstring subtitle;
+    std::wstring shortcut;
     bool isBadge;
-    const wchar_t* icon;
-    const wchar_t* previewTitle;
-    const wchar_t* previewPath;
-    const wchar_t* kind;
-    const wchar_t* contents;
-    const wchar_t* lastOpened;
-    const wchar_t* primaryAction;
+    std::wstring icon;
+    std::wstring previewTitle;
+    std::wstring previewPath;
+    std::wstring kind;
+    std::wstring contents;
+    std::wstring lastOpened;
+    std::wstring primaryAction;
+    ActionType actionType;
 };
-
-static const std::vector<CommandItem> g_allItems = {
-    {L"Suggested", L"Commands", L"Open Downloads", L"Jump to your downloaded files", L"↵", true, L"▣", L"Downloads", L"/Users/you/Downloads", L"Folder", L"24 items", L"Today, 10:42", L"Open in Finder"},
-    {L"Suggested", L"Commands", L"Create a quick note", L"Capture a thought in a new document", L"⌘ N", false, L"✎", L"Quick Note", L"/Users/you/Documents/Notes", L"Command", L"Markdown Template", L"Today, 09:15", L"Create Note"},
-    {L"Suggested", L"Commands", L"Toggle Do Not Disturb", L"Silence notifications and stay focused", L"System", false, L"☾", L"Do Not Disturb", L"System Settings / Focus", L"System Toggle", L"Status: Off", L"Yesterday, 22:00", L"Toggle Focus"},
-    {L"Recent", L"Files", L"Weekly review.md", L"Documents / Notes", L"12m ago", false, L"≡", L"Weekly review.md", L"/Users/you/Documents/Notes/Weekly review.md", L"Markdown Document", L"4.2 KB", L"12m ago", L"Open Document"},
-    {L"Recent", L"Files", L"Interface exploration.fig", L"Documents / Design", L"38m ago", false, L"❖", L"Interface exploration.fig", L"/Users/you/Documents/Design/Interface exploration.fig", L"Figma Design File", L"18.7 MB", L"38m ago", L"Open in Figma"},
-    {L"Recent", L"Applications", L"Terminal", L"Applications / Utilities", L"1h ago", false, L">_", L"Terminal.app", L"/System/Applications/Utilities/Terminal.app", L"Application", L"Version 2.14", L"1h ago", L"Launch Application"},
-};
-
-static const wchar_t* g_tabs[] = { L"All", L"Applications", L"Files", L"Commands" };
 
 struct RenderedRow {
-    int itemIndex; // Index into g_filteredItems
+    int itemIndex;
     RECT bounds;
 };
 
@@ -49,22 +62,143 @@ struct AppState {
     int hoverIndex = -1;
     int activeTab = 0;
     bool showPreview = true;
+    bool dndEnabled = false;
+    bool hoverPrimaryBtn = false;
+    bool hoverCopyBtn = false;
+    bool hoverPreviewToggle = false;
+    bool hoverEscBtn = false;
+
     std::wstring searchQuery;
+    std::wstring toastMessage;
+
+    std::vector<CommandItem> allItems;
     std::vector<CommandItem> filteredItems;
     std::vector<RenderedRow> rowHitBoxes;
+
     RECT tabHitBoxes[4] = {};
+    RECT previewToggleBox = {};
+    RECT primaryActionBox = {};
+    RECT copyPathBox = {};
+    RECT escBox = {};
 };
 
 static AppState g_state;
 static HWND g_hwnd = nullptr;
+static NOTIFYICONDATAW g_nid = {};
+static const wchar_t* g_tabs[] = { L"All", L"Applications", L"Files", L"Commands" };
 
-// Cached Fonts
+// Polices GDI
 static HFONT g_fontSearch = nullptr;
 static HFONT g_fontTitle = nullptr;
 static HFONT g_fontBody = nullptr;
 static HFONT g_fontSmall = nullptr;
 static HFONT g_fontTinyBold = nullptr;
 static HFONT g_fontPreviewIcon = nullptr;
+
+static std::wstring GetKnownFolder(REFKNOWNFOLDERID rfid, const std::wstring& fallback) {
+    PWSTR path = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(rfid, 0, nullptr, &path)) && path) {
+        std::wstring result(path);
+        CoTaskMemFree(path);
+        return result;
+    }
+    return fallback;
+}
+
+static int CountFolderItems(const std::wstring& folderPath) {
+    WIN32_FIND_DATAW fd;
+    std::wstring searchMask = folderPath + L"\\*";
+    HANDLE hFind = FindFirstFileW(searchMask.c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return 24;
+
+    int count = 0;
+    do {
+        if (wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) {
+            count++;
+        }
+    } while (FindNextFileW(hFind, &fd));
+    FindClose(hFind);
+    return count;
+}
+
+static void InitItems() {
+    std::wstring downloadsPath = GetKnownFolder(FOLDERID_Downloads, L"C:\\Users\\you\\Downloads");
+    std::wstring docsPath = GetKnownFolder(FOLDERID_Documents, L"C:\\Users\\you\\Documents");
+    int dlCount = CountFolderItems(downloadsPath);
+    std::wstring dlCountStr = std::to_wstring(dlCount) + L" items";
+
+    g_state.allItems = {
+        {
+            L"open-downloads", L"Suggested", L"Commands",
+            L"Open Downloads", L"Jump to your downloaded files", L"↵", true, L"▣",
+            L"Downloads", downloadsPath,
+            L"Folder", dlCountStr, L"Today, 10:42", L"Open in Explorer",
+            ACT_OPEN_DOWNLOADS
+        },
+        {
+            L"quick-note", L"Suggested", L"Commands",
+            L"Create a quick note", L"Capture a thought in a new document", L"⌘ N", false, L"✎",
+            L"Quick Note", docsPath + L"\\QuickNote.md",
+            L"Command", L"Markdown Template", L"Today, 09:15", L"Create Note",
+            ACT_QUICK_NOTE
+        },
+        {
+            L"toggle-dnd", L"Suggested", L"Commands",
+            L"Toggle Do Not Disturb", L"Silence notifications and stay focused", L"System", false, L"☾",
+            L"Do Not Disturb", L"System Settings / Focus",
+            L"System Toggle", L"Status: Off", L"Yesterday, 22:00", L"Toggle Focus",
+            ACT_TOGGLE_DND
+        },
+        {
+            L"weekly-review", L"Recent", L"Files",
+            L"Weekly review.md", L"Documents / Notes", L"12m ago", false, L"≡",
+            L"Weekly review.md", docsPath + L"\\Weekly review.md",
+            L"Markdown Document", L"4.2 KB", L"12m ago", L"Open Document",
+            ACT_OPEN_FILE
+        },
+        {
+            L"interface-exploration", L"Recent", L"Files",
+            L"Interface exploration.fig", L"Documents / Design", L"38m ago", false, L"❖",
+            L"Interface exploration.fig", docsPath + L"\\Interface exploration.fig",
+            L"Figma Design File", L"18.7 MB", L"38m ago", L"Open in Figma",
+            ACT_OPEN_FILE
+        },
+        {
+            L"terminal", L"Recent", L"Applications",
+            L"Terminal", L"Applications / Utilities", L"1h ago", false, L">_",
+            L"Terminal.exe", L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            L"Application", L"Version 2.14", L"1h ago", L"Launch Application",
+            ACT_OPEN_TERMINAL
+        }
+    };
+}
+
+static void ShowToast(const std::wstring& msg) {
+    g_state.toastMessage = msg;
+    if (g_hwnd) {
+        SetTimer(g_hwnd, TIMER_TOAST, 2200, nullptr);
+        InvalidateRect(g_hwnd, nullptr, FALSE);
+    }
+}
+
+static bool CopyTextToClipboard(HWND hwnd, const std::wstring& text) {
+    if (!OpenClipboard(hwnd)) return false;
+    EmptyClipboard();
+    size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!hMem) {
+        CloseClipboard();
+        return false;
+    }
+    void* ptr = GlobalLock(hMem);
+    if (ptr) {
+        memcpy(ptr, text.c_str(), bytes);
+        GlobalUnlock(hMem);
+        SetClipboardData(CF_UNICODETEXT, hMem);
+    }
+    CloseClipboard();
+    return true;
+}
 
 static bool ContainsCaseInsensitive(const std::wstring& haystack, const std::wstring& needle) {
     if (needle.empty()) return true;
@@ -85,10 +219,11 @@ static void RebuildFilteredList() {
     g_state.filteredItems.clear();
     const wchar_t* activeTabName = g_tabs[g_state.activeTab];
 
-    for (const auto& item : g_allItems) {
-        bool tabMatch = (g_state.activeTab == 0) || (wcscmp(item.category, activeTabName) == 0);
+    for (const auto& item : g_state.allItems) {
+        bool tabMatch = (g_state.activeTab == 0) || (item.category == activeTabName);
         bool searchMatch = ContainsCaseInsensitive(item.title, g_state.searchQuery) ||
-                           ContainsCaseInsensitive(item.subtitle, g_state.searchQuery);
+                           ContainsCaseInsensitive(item.subtitle, g_state.searchQuery) ||
+                           ContainsCaseInsensitive(item.kind, g_state.searchQuery);
         if (tabMatch && searchMatch) {
             g_state.filteredItems.push_back(item);
         }
@@ -98,6 +233,66 @@ static void RebuildFilteredList() {
         g_state.selectedIndex = g_state.filteredItems.empty() ? 0 : (int)g_state.filteredItems.size() - 1;
     }
     g_state.hoverIndex = -1;
+}
+
+static void ExecuteSelectedItem() {
+    if (g_state.filteredItems.empty()) return;
+    const auto& sel = g_state.filteredItems[g_state.selectedIndex];
+
+    switch (sel.actionType) {
+    case ACT_OPEN_DOWNLOADS:
+        ShellExecuteW(g_hwnd, L"open", sel.previewPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        ShowToast(L"Opened Downloads folder");
+        break;
+
+    case ACT_QUICK_NOTE: {
+        HANDLE hFile = CreateFileW(sel.previewPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            if (GetLastError() != ERROR_ALREADY_EXISTS) {
+                const char* header = "# Quick Note\r\n\r\nCapture your thoughts here...\r\n";
+                DWORD written = 0;
+                WriteFile(hFile, header, (DWORD)strlen(header), &written, nullptr);
+            }
+            CloseHandle(hFile);
+        }
+        ShellExecuteW(g_hwnd, L"open", L"notepad.exe", sel.previewPath.c_str(), nullptr, SW_SHOWNORMAL);
+        ShowToast(L"Launched Quick Note in Notepad");
+        break;
+    }
+
+    case ACT_TOGGLE_DND:
+        g_state.dndEnabled = !g_state.dndEnabled;
+        for (auto& item : g_state.allItems) {
+            if (item.actionType == ACT_TOGGLE_DND) {
+                item.contents = g_state.dndEnabled ? L"Status: On (Focused)" : L"Status: Off";
+            }
+        }
+        RebuildFilteredList();
+        ShowToast(g_state.dndEnabled ? L"Do Not Disturb: Enabled" : L"Do Not Disturb: Disabled");
+        break;
+
+    case ACT_OPEN_FILE: {
+        HINSTANCE res = ShellExecuteW(g_hwnd, L"open", sel.previewPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if ((INT_PTR)res <= 32) {
+            std::wstring docs = GetKnownFolder(FOLDERID_Documents, L"C:\\");
+            ShellExecuteW(g_hwnd, L"open", docs.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            ShowToast(L"Opened Documents folder");
+        } else {
+            ShowToast(L"Opened " + sel.title);
+        }
+        break;
+    }
+
+    case ACT_OPEN_TERMINAL: {
+        HINSTANCE res = ShellExecuteW(g_hwnd, L"open", L"wt.exe", nullptr, nullptr, SW_SHOWNORMAL);
+        if ((INT_PTR)res <= 32) {
+            ShellExecuteW(g_hwnd, L"open", L"powershell.exe", nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        ShowToast(L"Launched Terminal");
+        break;
+    }
+    }
 }
 
 static void EnsureFonts() {
@@ -171,16 +366,13 @@ static void DrawLabel(HDC hdc, const wchar_t* text, RECT rc, COLORREF color, HFO
 }
 
 static void PaintWindow(HDC hdc, RECT client) {
-    // 1. Outer Dark Canvas Background
     HBRUSH bgBrush = CreateSolidBrush(RGB(17, 17, 17));
     FillRect(hdc, &client, bgBrush);
     DeleteObject(bgBrush);
 
-    // 2. Main Command Palette Card
-    RECT panel = { 40, 24, 864, 528 };
+    RECT panel = { 32, 20, client.right - 32, client.bottom - 52 };
     FillRoundBox(hdc, panel, 20, RGB(28, 28, 28), true, RGB(46, 46, 46));
 
-    // 3. Top Search Bar Row
     RECT searchIconRc = { panel.left + 20, panel.top + 16, panel.left + 44, panel.top + 48 };
     DrawLabel(hdc, L"⌕", searchIconRc, RGB(122, 122, 122), g_fontTitle, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
@@ -189,15 +381,14 @@ static void PaintWindow(HDC hdc, RECT client) {
         DrawLabel(hdc, L"Search apps, files, and commands...", searchTextRc, RGB(115, 115, 115), g_fontSearch);
     } else {
         std::wstring displayQuery = g_state.searchQuery + L"|";
-        DrawLabel(hdc, displayQuery.c_str(), searchTextRc, RGB(240, 240, 240), g_fontSearch);
+        DrawLabel(hdc, displayQuery.c_str(), searchTextRc, RGB(242, 242, 242), g_fontSearch);
     }
 
-    // ESC Badge
     RECT escRect = { panel.right - 56, panel.top + 20, panel.right - 20, panel.top + 42 };
-    FillRoundBox(hdc, escRect, 6, RGB(38, 38, 38), true, RGB(54, 54, 54));
-    DrawLabel(hdc, L"esc", escRect, RGB(145, 145, 145), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    g_state.escBox = escRect;
+    FillRoundBox(hdc, escRect, 6, g_state.hoverEscBtn ? RGB(52, 52, 52) : RGB(38, 38, 38), true, RGB(58, 58, 58));
+    DrawLabel(hdc, L"esc", escRect, RGB(155, 155, 155), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
-    // 4. Filter Tabs Row
     int tabY = panel.top + 56;
     int tabX = panel.left + 20;
     int tabWidths[] = { 38, 92, 48, 84 };
@@ -213,125 +404,124 @@ static void PaintWindow(HDC hdc, RECT client) {
         tabX += tabWidths[i] + 8;
     }
 
-    // Switch ⇥ Hint
     RECT switchTxt = { panel.right - 92, tabY, panel.right - 46, tabY + 26 };
     DrawLabel(hdc, L"Switch", switchTxt, RGB(115, 115, 115), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
     RECT tabKey = { panel.right - 40, tabY + 3, panel.right - 20, tabY + 23 };
     FillRoundBox(hdc, tabKey, 5, RGB(38, 38, 38), true, RGB(54, 54, 54));
     DrawLabel(hdc, L"⇥", tabKey, RGB(150, 150, 150), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
-    // Horizontal divider under tabs
     int bodyTop = panel.top + 92;
     int bodyBottom = panel.bottom - 40;
     DrawLine(hdc, panel.left, bodyTop, panel.right, bodyTop, RGB(42, 42, 42));
 
-    // Vertical split divider between List and Preview
-    int splitX = panel.left + 520;
+    int splitX = panel.left + 530;
     if (g_state.showPreview) {
         DrawLine(hdc, splitX, bodyTop, splitX, bodyBottom, RGB(42, 42, 42));
     }
 
-    // 5. Left Column: Sectioned Command & File List
     g_state.rowHitBoxes.clear();
     int curY = bodyTop + 12;
     int listLeft = panel.left + 12;
     int listRight = (g_state.showPreview ? splitX : panel.right) - 12;
 
-    const wchar_t* sections[] = { L"Suggested", L"Recent" };
-    const wchar_t* sectionRight[] = { L"COMMANDS", L"LAST OPENED" };
+    if (g_state.filteredItems.empty()) {
+        RECT emptyRc = { listLeft, bodyTop + 80, listRight, bodyTop + 140 };
+        DrawLabel(hdc, L"No matching commands or files found.", emptyRc, RGB(110, 110, 110),
+            g_fontBody, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    } else {
+        const wchar_t* sections[] = { L"Suggested", L"Recent" };
+        const wchar_t* sectionRight[] = { L"COMMANDS", L"LAST OPENED" };
 
-    for (int s = 0; s < 2; ++s) {
-        // Check if any filtered items belong to this section
-        bool hasSectionItems = false;
-        for (const auto& item : g_state.filteredItems) {
-            if (wcscmp(item.section, sections[s]) == 0) {
-                hasSectionItems = true;
-                break;
+        for (int s = 0; s < 2; ++s) {
+            bool hasSectionItems = false;
+            for (const auto& item : g_state.filteredItems) {
+                if (item.section == sections[s]) {
+                    hasSectionItems = true;
+                    break;
+                }
             }
+            if (!hasSectionItems) continue;
+
+            RECT secLeftRc = { listLeft + 10, curY, listLeft + 200, curY + 20 };
+            RECT secRightRc = { listRight - 140, curY, listRight - 10, curY + 20 };
+            DrawLabel(hdc, sections[s], secLeftRc, RGB(117, 117, 117), g_fontSmall);
+            DrawLabel(hdc, sectionRight[s], secRightRc, RGB(105, 105, 105), g_fontTinyBold, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
+            curY += 24;
+
+            for (int i = 0; i < (int)g_state.filteredItems.size(); ++i) {
+                const auto& item = g_state.filteredItems[i];
+                if (item.section != sections[s]) continue;
+
+                RECT rowRc = { listLeft, curY, listRight, curY + 50 };
+                g_state.rowHitBoxes.push_back({ i, rowRc });
+
+                bool selected = (g_state.selectedIndex == i);
+                bool hovered = (g_state.hoverIndex == i);
+
+                if (selected) {
+                    FillRoundBox(hdc, rowRc, 12, RGB(237, 237, 237));
+                } else if (hovered) {
+                    FillRoundBox(hdc, rowRc, 12, RGB(38, 38, 38));
+                }
+
+                RECT iconRc = { rowRc.left + 12, rowRc.top, rowRc.left + 38, rowRc.bottom };
+                DrawLabel(hdc, item.icon.c_str(), iconRc, selected ? RGB(24, 24, 24) : RGB(145, 145, 145),
+                    g_fontBody, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
+                RECT titleRc = { rowRc.left + 46, rowRc.top + 7, rowRc.right - 80, rowRc.top + 26 };
+                DrawLabel(hdc, item.title.c_str(), titleRc, selected ? RGB(20, 20, 20) : RGB(237, 237, 237), g_fontBody);
+
+                RECT subRc = { rowRc.left + 46, rowRc.top + 26, rowRc.right - 80, rowRc.bottom - 6 };
+                DrawLabel(hdc, item.subtitle.c_str(), subRc, selected ? RGB(90, 90, 90) : RGB(120, 120, 120), g_fontSmall);
+
+                if (item.isBadge) {
+                    RECT badgeRc = { rowRc.right - 36, rowRc.top + 14, rowRc.right - 12, rowRc.bottom - 14 };
+                    FillRoundBox(hdc, badgeRc, 6, selected ? RGB(218, 218, 218) : RGB(38, 38, 38),
+                        true, selected ? RGB(195, 195, 195) : RGB(54, 54, 54));
+                    DrawLabel(hdc, item.shortcut.c_str(), badgeRc, selected ? RGB(45, 45, 45) : RGB(140, 140, 140),
+                        g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                } else {
+                    RECT rightLblRc = { rowRc.right - 90, rowRc.top, rowRc.right - 12, rowRc.bottom };
+                    DrawLabel(hdc, item.shortcut.c_str(), rightLblRc, selected ? RGB(85, 85, 85) : RGB(115, 115, 115),
+                        g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
+                }
+
+                curY += 52;
+            }
+            curY += 8;
         }
-        if (!hasSectionItems) continue;
-
-        // Section Header
-        RECT secLeftRc = { listLeft + 10, curY, listLeft + 200, curY + 20 };
-        RECT secRightRc = { listRight - 140, curY, listRight - 10, curY + 20 };
-        DrawLabel(hdc, sections[s], secLeftRc, RGB(117, 117, 117), g_fontSmall);
-        DrawLabel(hdc, sectionRight[s], secRightRc, RGB(105, 105, 105), g_fontTinyBold, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
-        curY += 24;
-
-        // Render items in this section
-        for (int i = 0; i < (int)g_state.filteredItems.size(); ++i) {
-            const auto& item = g_state.filteredItems[i];
-            if (wcscmp(item.section, sections[s]) != 0) continue;
-
-            RECT rowRc = { listLeft, curY, listRight, curY + 50 };
-            g_state.rowHitBoxes.push_back({ i, rowRc });
-
-            bool selected = (g_state.selectedIndex == i);
-            bool hovered = (g_state.hoverIndex == i);
-
-            if (selected) {
-                FillRoundBox(hdc, rowRc, 12, RGB(237, 237, 237));
-            } else if (hovered) {
-                FillRoundBox(hdc, rowRc, 12, RGB(38, 38, 38));
-            }
-
-            // Icon
-            RECT iconRc = { rowRc.left + 12, rowRc.top, rowRc.left + 38, rowRc.bottom };
-            DrawLabel(hdc, item.icon, iconRc, selected ? RGB(24, 24, 24) : RGB(145, 145, 145),
-                g_fontBody, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-
-            // Title & Subtitle
-            RECT titleRc = { rowRc.left + 46, rowRc.top + 7, rowRc.right - 80, rowRc.top + 26 };
-            DrawLabel(hdc, item.title, titleRc, selected ? RGB(20, 20, 20) : RGB(237, 237, 237), g_fontBody);
-
-            RECT subRc = { rowRc.left + 46, rowRc.top + 26, rowRc.right - 80, rowRc.bottom - 6 };
-            DrawLabel(hdc, item.subtitle, subRc, selected ? RGB(90, 90, 90) : RGB(120, 120, 120), g_fontSmall);
-
-            // Right label or keycap badge
-            if (item.isBadge) {
-                RECT badgeRc = { rowRc.right - 36, rowRc.top + 14, rowRc.right - 12, rowRc.bottom - 14 };
-                FillRoundBox(hdc, badgeRc, 6, selected ? RGB(218, 218, 218) : RGB(38, 38, 38),
-                    true, selected ? RGB(195, 195, 195) : RGB(54, 54, 54));
-                DrawLabel(hdc, item.shortcut, badgeRc, selected ? RGB(45, 45, 45) : RGB(140, 140, 140),
-                    g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-            } else {
-                RECT rightLblRc = { rowRc.right - 90, rowRc.top, rowRc.right - 12, rowRc.bottom };
-                DrawLabel(hdc, item.shortcut, rightLblRc, selected ? RGB(85, 85, 85) : RGB(115, 115, 115),
-                    g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
-            }
-
-            curY += 52;
-        }
-        curY += 8; // Gap between sections
     }
 
-    // 6. Right Column: Contextual Preview Pane
+    int pvIconRight = panel.right - 18;
+    RECT pvToggleRc = { pvIconRight - 24, bodyTop + 12, pvIconRight, bodyTop + 34 };
+    g_state.previewToggleBox = pvToggleRc;
+    if (g_state.hoverPreviewToggle) {
+        FillRoundBox(hdc, pvToggleRc, 6, RGB(42, 42, 42));
+    }
+    DrawLabel(hdc, L"◧", pvToggleRc, g_state.hoverPreviewToggle ? RGB(210, 210, 210) : RGB(120, 120, 120),
+        g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
     if (g_state.showPreview && !g_state.filteredItems.empty()) {
         const auto& sel = g_state.filteredItems[g_state.selectedIndex];
         int pvLeft = splitX + 20;
         int pvRight = panel.right - 20;
         int pvTop = bodyTop + 14;
 
-        // Preview header
-        RECT pvHeaderRc = { pvLeft, pvTop, pvRight, pvTop + 20 };
+        RECT pvHeaderRc = { pvLeft, pvTop, pvRight - 30, pvTop + 20 };
         DrawLabel(hdc, L"Preview", pvHeaderRc, RGB(120, 120, 120), g_fontSmall);
-        DrawLabel(hdc, L"◧", pvHeaderRc, RGB(120, 120, 120), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
 
-        // Large Rounded Icon Box
         RECT iconBox = { pvLeft, pvTop + 30, pvLeft + 72, pvTop + 102 };
         FillRoundBox(hdc, iconBox, 16, RGB(36, 36, 36), true, RGB(48, 48, 48));
-        DrawLabel(hdc, sel.icon, iconBox, RGB(220, 220, 220), g_fontPreviewIcon, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        DrawLabel(hdc, sel.icon.c_str(), iconBox, RGB(220, 220, 220), g_fontPreviewIcon, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
-        // Preview Title & Path
         RECT pvTitleRc = { pvLeft, pvTop + 114, pvRight, pvTop + 142 };
-        DrawLabel(hdc, sel.previewTitle, pvTitleRc, RGB(245, 245, 245), g_fontTitle);
+        DrawLabel(hdc, sel.previewTitle.c_str(), pvTitleRc, RGB(245, 245, 245), g_fontTitle);
 
         RECT pvPathRc = { pvLeft, pvTop + 142, pvRight, pvTop + 162 };
-        DrawLabel(hdc, sel.previewPath, pvPathRc, RGB(115, 115, 115), g_fontSmall);
+        DrawLabel(hdc, sel.previewPath.c_str(), pvPathRc, RGB(115, 115, 115), g_fontSmall, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_PATH_ELLIPSIS);
 
-        // Key-Value Metadata Rows
         const wchar_t* metaLabels[] = { L"Kind", L"Contents", L"Last opened" };
-        const wchar_t* metaValues[] = { sel.kind, sel.contents, sel.lastOpened };
+        const wchar_t* metaValues[] = { sel.kind.c_str(), sel.contents.c_str(), sel.lastOpened.c_str() };
         int metaY = pvTop + 178;
 
         for (int i = 0; i < 3; ++i) {
@@ -340,27 +530,32 @@ static void PaintWindow(HDC hdc, RECT client) {
             DrawLabel(hdc, metaValues[i], rowRc, RGB(212, 212, 212), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
         }
 
-        // Divider above action buttons
         int actionTop = pvTop + 266;
         DrawLine(hdc, pvLeft, actionTop, pvRight, actionTop, RGB(42, 42, 42));
 
-        // Primary Action Button
         RECT mainBtn = { pvLeft, actionTop + 14, pvRight, actionTop + 50 };
-        FillRoundBox(hdc, mainBtn, 10, RGB(42, 42, 42), true, RGB(54, 54, 54));
+        g_state.primaryActionBox = mainBtn;
+        FillRoundBox(hdc, mainBtn, 10, g_state.hoverPrimaryBtn ? RGB(54, 54, 54) : RGB(42, 42, 42), true, RGB(62, 62, 62));
 
         RECT mainBtnText = { mainBtn.left + 14, mainBtn.top, mainBtn.right - 34, mainBtn.bottom };
-        DrawLabel(hdc, sel.primaryAction, mainBtnText, RGB(245, 245, 245), g_fontSmall);
+        DrawLabel(hdc, sel.primaryAction.c_str(), mainBtnText, RGB(245, 245, 245), g_fontSmall);
 
         RECT mainBtnKey = { mainBtn.right - 30, mainBtn.top, mainBtn.right - 10, mainBtn.bottom };
         DrawLabel(hdc, L"↵", mainBtnKey, RGB(155, 155, 155), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
-        // Secondary Action ("Copy path")
-        RECT copyRow = { pvLeft + 14, actionTop + 56, pvRight - 10, actionTop + 82 };
-        DrawLabel(hdc, L"Copy path", copyRow, RGB(138, 138, 138), g_fontSmall);
+        RECT copyBtn = { pvLeft, actionTop + 54, pvRight, actionTop + 84 };
+        g_state.copyPathBox = copyBtn;
+        if (g_state.hoverCopyBtn) {
+            FillRoundBox(hdc, copyBtn, 8, RGB(36, 36, 36));
+        }
+        RECT copyRow = { copyBtn.left + 14, copyBtn.top, copyBtn.right - 10, copyBtn.bottom };
+        DrawLabel(hdc, L"Copy path", copyRow, g_state.hoverCopyBtn ? RGB(210, 210, 210) : RGB(138, 138, 138), g_fontSmall);
         DrawLabel(hdc, L"⌘ ⇧ C", copyRow, RGB(110, 110, 110), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
+    } else {
+        g_state.primaryActionBox = { 0, 0, 0, 0 };
+        g_state.copyPathBox = { 0, 0, 0, 0 };
     }
 
-    // 7. Footer Bar inside Card
     DrawLine(hdc, panel.left, bodyBottom, panel.right, bodyBottom, RGB(42, 42, 42));
 
     int fY = bodyBottom + 9;
@@ -381,7 +576,11 @@ static void PaintWindow(HDC hdc, RECT client) {
     RECT openText = { panel.left + 175, fY, panel.left + 230, fY + 22 };
     DrawLabel(hdc, L"Open", openText, RGB(120, 120, 120), g_fontSmall);
 
-    // Right side of footer: Actions ⌘ ↵
+    if (!g_state.toastMessage.empty()) {
+        RECT toastRc = { panel.left + 250, fY, panel.right - 140, fY + 22 };
+        DrawLabel(hdc, g_state.toastMessage.c_str(), toastRc, RGB(180, 225, 190), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    }
+
     RECT actText = { panel.right - 120, fY, panel.right - 70, fY + 22 };
     DrawLabel(hdc, L"Actions", actText, RGB(120, 120, 120), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
 
@@ -392,7 +591,6 @@ static void PaintWindow(HDC hdc, RECT client) {
     DrawLabel(hdc, L"⌘", cmdKey, RGB(150, 150, 150), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
     DrawLabel(hdc, L"↵", retKey, RGB(150, 150, 150), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
-    // 8. Bottom Presentation Caption (Outside Card)
     int capY = panel.bottom + 14;
     RECT capLeft = { panel.left + 4, capY, panel.left + 145, capY + 24 };
     DrawLabel(hdc, L"A little less clicking —", capLeft, RGB(115, 115, 115), g_fontSmall);
@@ -408,8 +606,7 @@ static void PaintWindow(HDC hdc, RECT client) {
     DrawLabel(hdc, L"Personal workspace", capRight, RGB(115, 115, 115), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
 }
 
-static int HitTestRow(int x, int y) {
-    POINT pt = { x, y };
+static int HitTestRow(POINT pt) {
     for (const auto& row : g_state.rowHitBoxes) {
         if (PtInRect(&row.bounds, pt)) {
             return row.itemIndex;
@@ -418,8 +615,7 @@ static int HitTestRow(int x, int y) {
     return -1;
 }
 
-static int HitTestTab(int x, int y) {
-    POINT pt = { x, y };
+static int HitTestTab(POINT pt) {
     for (int i = 0; i < 4; ++i) {
         if (PtInRect(&g_state.tabHitBoxes[i], pt)) {
             return i;
@@ -433,11 +629,73 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CREATE:
         g_hwnd = hwnd;
         EnsureFonts();
+        InitItems();
         RebuildFilteredList();
+
+        g_nid.cbSize = sizeof(NOTIFYICONDATAW);
+        g_nid.hWnd = hwnd;
+        g_nid.uID = 1;
+        g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+        g_nid.uCallbackMessage = WM_TRAYICON;
+        g_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+        wcscpy_s(g_nid.szTip, L"Command Palette (Ctrl+K)");
+        Shell_NotifyIconW(NIM_ADD, &g_nid);
+
+        RegisterHotKey(hwnd, HOTKEY_CTRL_K, MOD_CONTROL, 'K');
+        RegisterHotKey(hwnd, HOTKEY_ALT_SPACE, MOD_ALT, VK_SPACE);
+        return 0;
+
+    case WM_TRAYICON:
+        if (LOWORD(lParam) == WM_LBUTTONUP || LOWORD(lParam) == WM_RBUTTONUP) {
+            POINT pt;
+            GetCursorPos(&pt);
+            SetForegroundWindow(hwnd);
+
+            HMENU hMenu = CreatePopupMenu();
+            AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"Afficher / Masquer (Ctrl+K)");
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Quitter");
+
+            TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, nullptr);
+            DestroyMenu(hMenu);
+        }
+        return 0;
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == ID_TRAY_SHOW) {
+            if (IsWindowVisible(hwnd)) {
+                ShowWindow(hwnd, SW_HIDE);
+            } else {
+                ShowWindow(hwnd, SW_SHOW);
+                SetForegroundWindow(hwnd);
+                SetFocus(hwnd);
+            }
+        } else if (LOWORD(wParam) == ID_TRAY_EXIT) {
+            PostQuitMessage(0);
+        }
+        return 0;
+
+    case WM_HOTKEY:
+        if (wParam == HOTKEY_CTRL_K || wParam == HOTKEY_ALT_SPACE) {
+            if (IsWindowVisible(hwnd)) {
+                ShowWindow(hwnd, SW_HIDE);
+            } else {
+                ShowWindow(hwnd, SW_SHOW);
+                SetForegroundWindow(hwnd);
+                SetFocus(hwnd);
+            }
+        }
+        return 0;
+
+    case WM_TIMER:
+        if (wParam == TIMER_TOAST) {
+            KillTimer(hwnd, TIMER_TOAST);
+            g_state.toastMessage.clear();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         return 0;
 
     case WM_ERASEBKGND:
-        // Prevent background erase to eliminate flickering
         return 1;
 
     case WM_PAINT: {
@@ -449,7 +707,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int width = client.right - client.left;
         int height = client.bottom - client.top;
 
-        // Off-screen double buffer
         HDC memDC = CreateCompatibleDC(hdc);
         HBITMAP memBmp = CreateCompatibleBitmap(hdc, width, height);
         HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
@@ -467,32 +724,86 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_MOUSEMOVE: {
-        int x = GET_X_LPARAM(lParam);
-        int y = GET_Y_LPARAM(lParam);
-        int idx = HitTestRow(x, y);
-        if (idx != g_state.hoverIndex) {
-            g_state.hoverIndex = idx;
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        int rowIdx = HitTestRow(pt);
+        bool hPrimary = PtInRect(&g_state.primaryActionBox, pt) != 0;
+        bool hCopy = PtInRect(&g_state.copyPathBox, pt) != 0;
+        bool hToggle = PtInRect(&g_state.previewToggleBox, pt) != 0;
+        bool hEsc = PtInRect(&g_state.escBox, pt) != 0;
+
+        if (rowIdx != g_state.hoverIndex ||
+            hPrimary != g_state.hoverPrimaryBtn ||
+            hCopy != g_state.hoverCopyBtn ||
+            hToggle != g_state.hoverPreviewToggle ||
+            hEsc != g_state.hoverEscBtn) {
+            g_state.hoverIndex = rowIdx;
+            g_state.hoverPrimaryBtn = hPrimary;
+            g_state.hoverCopyBtn = hCopy;
+            g_state.hoverPreviewToggle = hToggle;
+            g_state.hoverEscBtn = hEsc;
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
     }
 
     case WM_LBUTTONDOWN: {
-        int x = GET_X_LPARAM(lParam);
-        int y = GET_Y_LPARAM(lParam);
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
-        int tabIdx = HitTestTab(x, y);
-        if (tabIdx != -1 && tabIdx != g_state.activeTab) {
+        if (PtInRect(&g_state.escBox, pt)) {
+            if (!g_state.searchQuery.empty()) {
+                g_state.searchQuery.clear();
+                RebuildFilteredList();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            } else {
+                ShowWindow(hwnd, SW_HIDE);
+            }
+            return 0;
+        }
+
+        if (PtInRect(&g_state.previewToggleBox, pt)) {
+            g_state.showPreview = !g_state.showPreview;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+
+        int tabIdx = HitTestTab(pt);
+        if (tabIdx != -1) {
             g_state.activeTab = tabIdx;
             RebuildFilteredList();
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
 
-        int rowIdx = HitTestRow(x, y);
-        if (rowIdx >= 0 && rowIdx != g_state.selectedIndex) {
-            g_state.selectedIndex = rowIdx;
-            InvalidateRect(hwnd, nullptr, FALSE);
+        if (g_state.showPreview && PtInRect(&g_state.primaryActionBox, pt)) {
+            ExecuteSelectedItem();
+            return 0;
+        }
+
+        if (g_state.showPreview && PtInRect(&g_state.copyPathBox, pt)) {
+            if (!g_state.filteredItems.empty()) {
+                const auto& sel = g_state.filteredItems[g_state.selectedIndex];
+                if (CopyTextToClipboard(hwnd, sel.previewPath)) {
+                    ShowToast(L"Copied path to clipboard!");
+                }
+            }
+            return 0;
+        }
+
+        int rowIdx = HitTestRow(pt);
+        if (rowIdx >= 0) {
+            if (g_state.selectedIndex == rowIdx) {
+                ExecuteSelectedItem();
+            } else {
+                g_state.selectedIndex = rowIdx;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
+
+        if (pt.y < 72) {
+            ReleaseCapture();
+            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            return 0;
         }
         return 0;
     }
@@ -504,7 +815,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 RebuildFilteredList();
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
-        } else if (wParam >= 32 && wParam != 127) {
+        } else if (wParam >= 32 && wParam != 127 && !(GetKeyState(VK_CONTROL) & 0x8000)) {
             g_state.searchQuery.push_back((wchar_t)wParam);
             RebuildFilteredList();
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -512,7 +823,36 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     }
 
-    case WM_KEYDOWN:
+    case WM_KEYDOWN: {
+        bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+
+        if (ctrlDown && shiftDown && wParam == 'C') {
+            if (!g_state.filteredItems.empty()) {
+                const auto& sel = g_state.filteredItems[g_state.selectedIndex];
+                if (CopyTextToClipboard(hwnd, sel.previewPath)) {
+                    ShowToast(L"Copied path to clipboard!");
+                }
+            }
+            return 0;
+        }
+
+        if (ctrlDown && wParam == 'N') {
+            for (size_t i = 0; i < g_state.filteredItems.size(); ++i) {
+                if (g_state.filteredItems[i].actionType == ACT_QUICK_NOTE) {
+                    g_state.selectedIndex = (int)i;
+                    ExecuteSelectedItem();
+                    return 0;
+                }
+            }
+        }
+
+        if (ctrlDown && wParam == 'P') {
+            g_state.showPreview = !g_state.showPreview;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+
         if (wParam == VK_UP && !g_state.filteredItems.empty()) {
             int n = (int)g_state.filteredItems.size();
             g_state.selectedIndex = (g_state.selectedIndex - 1 + n) % n;
@@ -525,8 +865,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
+        if (wParam == VK_RETURN) {
+            ExecuteSelectedItem();
+            return 0;
+        }
         if (wParam == VK_TAB) {
-            g_state.activeTab = (g_state.activeTab + 1) % 4;
+            if (shiftDown) {
+                g_state.activeTab = (g_state.activeTab + 3) % 4;
+            } else {
+                g_state.activeTab = (g_state.activeTab + 1) % 4;
+            }
             RebuildFilteredList();
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -537,22 +885,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 RebuildFilteredList();
                 InvalidateRect(hwnd, nullptr, FALSE);
             } else {
-                PostQuitMessage(0);
+                ShowWindow(hwnd, SW_HIDE);
             }
             return 0;
         }
         break;
+    }
 
     case WM_DESTROY:
+        Shell_NotifyIconW(NIM_DELETE, &g_nid);
+        UnregisterHotKey(hwnd, HOTKEY_CTRL_K);
+        UnregisterHotKey(hwnd, HOTKEY_ALT_SPACE);
         CleanupFonts();
         PostQuitMessage(0);
         return 0;
     }
 
-    return DefWindowProc(hwnd, msg, wParam, lParam);
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE, LPTSTR, int nCmdShow) {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
     const wchar_t CLASS_NAME[] = L"CommandPaletteWin32";
 
     WNDCLASSEXW wc = {};
@@ -560,34 +914,43 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE, LPTSTR, int nCmdShow) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr; // Handled via double-buffering in WM_PAINT
+    wc.hbrBackground = nullptr;
     wc.lpszClassName = CLASS_NAME;
     RegisterClassExW(&wc);
 
-    // Calculate exact window size so client area is 904x580
-    RECT desiredClient = { 0, 0, 904, 580 };
-    AdjustWindowRectEx(&desiredClient, WS_OVERLAPPEDWINDOW, FALSE, 0);
+    int winWidth = 910;
+    int winHeight = 576;
+
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+    int posX = (screenW - winWidth) / 2;
+    int posY = (screenH - winHeight) / 2;
 
     HWND hwnd = CreateWindowExW(
-        0,
+        WS_EX_APPWINDOW,
         CLASS_NAME,
         L"Command Palette",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT,
-        desiredClient.right - desiredClient.left,
-        desiredClient.bottom - desiredClient.top,
+        WS_POPUP | WS_VISIBLE,
+        posX, posY, winWidth, winHeight,
         nullptr, nullptr, hInstance, nullptr);
 
-    if (!hwnd) return 0;
+    if (!hwnd) {
+        CoUninitialize();
+        return 0;
+    }
+
+    HRGN hRgn = CreateRoundRectRgn(0, 0, winWidth + 1, winHeight + 1, 24, 24);
+    SetWindowRgn(hwnd, hRgn, TRUE);
 
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
 
     MSG msg = {};
-    while (GetMessage(&msg, nullptr, 0, 0)) {
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
+    CoUninitialize();
     return (int)msg.wParam;
 }
