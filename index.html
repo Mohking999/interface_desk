@@ -270,186 +270,232 @@
         const recentItems = filteredItems.filter((item) => item.section === 'Recent');
 
         return (
-          <div className="app-shell">
-            <div className="command-palette">
-              <header className="topbar">
-                <div className="search-row">
-                  <SearchIcon className="search-icon" />
-                  <input
-                    type="text"
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                    placeholder="Search apps, files, and commands..."
-                    autoFocus
-                  />
-                  <kbd className="keycap">esc</kbd>
-                </div>
-              </header>
+          <div className="desktop-scene">
+            <div className="desktop-wallpaper" />
 
-              <div className="tabs-row">
-                <div className="tabs">
-                  {TABS.map((tab) => (
-                    <button
-                      key={tab}
-                      className={tab === activeTab ? 'tab active' : 'tab'}
-                      onClick={() => setActiveTab(tab)}
-                    >
-                      {tab}
-                    </button>
-                  ))}
-                </div>
-                <div className="switch-indicator">
-                  <span>Switch</span>
-                  <kbd className="mini-key">⇥</kbd>
-                </div>
+            <div className="desktop-icons left-icons">
+              <div className="desktop-icon is-soft">
+                <span className="icon-badge app-blue">⌂</span>
+                <span>Home</span>
               </div>
-
-              <div className="content-grid">
-                <div className={showPreview ? 'results-column has-preview' : 'results-column full'}>
-                  <div className="result-section">
-                    {suggestedItems.length > 0 && (
-                      <div>
-                        <div className="section-label-row">
-                          <span>Suggested</span>
-                          <span className="section-tag">Commands</span>
-                        </div>
-                        <div className="result-list">
-                          {suggestedItems.map((item) => {
-                            const Icon = item.icon;
-                            const isSelected = selectedItem?.id === item.id;
-                            return (
-                              <button
-                                key={item.id}
-                                className={isSelected ? 'result-item selected' : 'result-item'}
-                                onClick={() => setSelectedId(item.id)}
-                              >
-                                <div className="left-side">
-                                  <Icon className={isSelected ? 'result-icon selected' : 'result-icon'} />
-                                  <div className="title-wrap">
-                                    <div className={isSelected ? 'result-title selected' : 'result-title'}>{item.title}</div>
-                                    <div className={isSelected ? 'result-subtitle selected' : 'result-subtitle'}>{item.subtitle}</div>
-                                  </div>
-                                </div>
-                                {item.isShortcutBadge ? (
-                                  <kbd className={isSelected ? 'badge key selected' : 'badge key'}>{item.rightLabel}</kbd>
-                                ) : (
-                                  <span className={isSelected ? 'badge text selected' : 'badge text'}>{item.rightLabel}</span>
-                                )}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="result-section">
-                    {recentItems.length > 0 && (
-                      <div>
-                        <div className="section-label-row">
-                          <span>Recent</span>
-                          <span className="section-tag">Last Opened</span>
-                        </div>
-                        <div className="result-list">
-                          {recentItems.map((item) => {
-                            const Icon = item.icon;
-                            const isSelected = selectedItem?.id === item.id;
-                            return (
-                              <button
-                                key={item.id}
-                                className={isSelected ? 'result-item selected' : 'result-item'}
-                                onClick={() => setSelectedId(item.id)}
-                              >
-                                <div className="left-side">
-                                  <Icon className={isSelected ? 'result-icon selected' : 'result-icon'} />
-                                  <div className="title-wrap">
-                                    <div className={isSelected ? 'result-title selected' : 'result-title'}>{item.title}</div>
-                                    <div className={isSelected ? 'result-subtitle selected' : 'result-subtitle'}>{item.subtitle}</div>
-                                  </div>
-                                </div>
-                                <span className={isSelected ? 'badge text selected' : 'badge text'}>{item.rightLabel}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {showPreview && selectedItem && (
-                  <aside className="preview-panel">
-                    <div className="preview-header">
-                      <span>Preview</span>
-                      <button onClick={() => setShowPreview(false)} className="preview-toggle" aria-label="Hide preview">
-                        <PanelRightIcon className="mini-panel-icon" />
-                      </button>
-                    </div>
-
-                    <div className="preview-icon-box">
-                      {React.createElement(selectedItem.icon, { className: 'preview-icon' })}
-                    </div>
-
-                    <h2>{selectedItem.preview.title}</h2>
-                    <p>{selectedItem.preview.path}</p>
-
-                    <div className="meta-list">
-                      <div className="meta-row">
-                        <span>Kind</span>
-                        <span>{selectedItem.preview.kind}</span>
-                      </div>
-                      <div className="meta-row">
-                        <span>Contents</span>
-                        <span>{selectedItem.preview.contents}</span>
-                      </div>
-                      <div className="meta-row">
-                        <span>Last opened</span>
-                        <span>{selectedItem.preview.lastOpened}</span>
-                      </div>
-                    </div>
-
-                    <div className="preview-actions">
-                      <button className="primary-action">
-                        <span>{selectedItem.preview.primaryAction}</span>
-                        <CornerDownLeftIcon className="action-arrow" />
-                      </button>
-                      <button className="secondary-action">
-                        <span>Copy path</span>
-                        <span className="shortcut-cluster">⌘ ⇧ C</span>
-                      </button>
-                    </div>
-                  </aside>
-                )}
+              <div className="desktop-icon is-soft">
+                <span className="icon-badge app-green">🗂</span>
+                <span>Downloads</span>
               </div>
-
-              <footer className="footer-bar">
-                <div className="footer-group left">
-                  <div className="footer-split">
-                    <kbd className="footer-key"><ArrowUpIcon className="footer-icon" /></kbd>
-                    <kbd className="footer-key"><ArrowDownIcon className="footer-icon" /></kbd>
-                    <span>Navigate</span>
-                  </div>
-                  <div className="footer-split">
-                    <kbd className="footer-key">↵</kbd>
-                    <span>Open</span>
-                  </div>
-                </div>
-
-                <div className="footer-group right">
-                  <span>Actions</span>
-                  <kbd className="footer-key small">⌘</kbd>
-                  <kbd className="footer-key small">↵</kbd>
-                </div>
-              </footer>
+              <div className="desktop-icon is-soft">
+                <span className="icon-badge app-red">▣</span>
+                <span>Documents</span>
+              </div>
             </div>
 
-            <div className="bottom-caption">
-              <div className="caption-left">
-                <span>A little less clicking —</span>
-                <kbd className="caption-key">⌘ K</kbd>
-                <span>from anywhere.</span>
+            <div className="app-shell">
+              <div className="command-palette">
+                <header className="topbar">
+                  <div className="search-row">
+                    <SearchIcon className="search-icon" />
+                    <input
+                      type="text"
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                      placeholder="Search apps, files, and commands..."
+                      autoFocus
+                    />
+                    <kbd className="keycap">esc</kbd>
+                  </div>
+                </header>
+
+                <div className="tabs-row">
+                  <div className="tabs">
+                    {TABS.map((tab) => (
+                      <button
+                        key={tab}
+                        className={tab === activeTab ? 'tab active' : 'tab'}
+                        onClick={() => setActiveTab(tab)}
+                      >
+                        {tab}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="switch-indicator">
+                    <span>Switch</span>
+                    <kbd className="mini-key">⇥</kbd>
+                  </div>
+                </div>
+
+                <div className="content-grid">
+                  <div className={showPreview ? 'results-column has-preview' : 'results-column full'}>
+                    <div className="result-section">
+                      {suggestedItems.length > 0 && (
+                        <div>
+                          <div className="section-label-row">
+                            <span>Suggested</span>
+                            <span className="section-tag">Commands</span>
+                          </div>
+                          <div className="result-list">
+                            {suggestedItems.map((item) => {
+                              const Icon = item.icon;
+                              const isSelected = selectedItem?.id === item.id;
+                              return (
+                                <button
+                                  key={item.id}
+                                  className={isSelected ? 'result-item selected' : 'result-item'}
+                                  onClick={() => setSelectedId(item.id)}
+                                >
+                                  <div className="left-side">
+                                    <Icon className={isSelected ? 'result-icon selected' : 'result-icon'} />
+                                    <div className="title-wrap">
+                                      <div className={isSelected ? 'result-title selected' : 'result-title'}>{item.title}</div>
+                                      <div className={isSelected ? 'result-subtitle selected' : 'result-subtitle'}>{item.subtitle}</div>
+                                    </div>
+                                  </div>
+                                  {item.isShortcutBadge ? (
+                                    <kbd className={isSelected ? 'badge key selected' : 'badge key'}>{item.rightLabel}</kbd>
+                                  ) : (
+                                    <span className={isSelected ? 'badge text selected' : 'badge text'}>{item.rightLabel}</span>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="result-section">
+                      {recentItems.length > 0 && (
+                        <div>
+                          <div className="section-label-row">
+                            <span>Recent</span>
+                            <span className="section-tag">Last Opened</span>
+                          </div>
+                          <div className="result-list">
+                            {recentItems.map((item) => {
+                              const Icon = item.icon;
+                              const isSelected = selectedItem?.id === item.id;
+                              return (
+                                <button
+                                  key={item.id}
+                                  className={isSelected ? 'result-item selected' : 'result-item'}
+                                  onClick={() => setSelectedId(item.id)}
+                                >
+                                  <div className="left-side">
+                                    <Icon className={isSelected ? 'result-icon selected' : 'result-icon'} />
+                                    <div className="title-wrap">
+                                      <div className={isSelected ? 'result-title selected' : 'result-title'}>{item.title}</div>
+                                      <div className={isSelected ? 'result-subtitle selected' : 'result-subtitle'}>{item.subtitle}</div>
+                                    </div>
+                                  </div>
+                                  <span className={isSelected ? 'badge text selected' : 'badge text'}>{item.rightLabel}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {showPreview && selectedItem && (
+                    <aside className="preview-panel">
+                      <div className="preview-header">
+                        <span>Preview</span>
+                        <button onClick={() => setShowPreview(false)} className="preview-toggle" aria-label="Hide preview">
+                          <PanelRightIcon className="mini-panel-icon" />
+                        </button>
+                      </div>
+
+                      <div className="preview-icon-box">
+                        {React.createElement(selectedItem.icon, { className: 'preview-icon' })}
+                      </div>
+
+                      <h2>{selectedItem.preview.title}</h2>
+                      <p>{selectedItem.preview.path}</p>
+
+                      <div className="meta-list">
+                        <div className="meta-row">
+                          <span>Kind</span>
+                          <span>{selectedItem.preview.kind}</span>
+                        </div>
+                        <div className="meta-row">
+                          <span>Contents</span>
+                          <span>{selectedItem.preview.contents}</span>
+                        </div>
+                        <div className="meta-row">
+                          <span>Last opened</span>
+                          <span>{selectedItem.preview.lastOpened}</span>
+                        </div>
+                      </div>
+
+                      <div className="preview-actions">
+                        <button className="primary-action">
+                          <span>{selectedItem.preview.primaryAction}</span>
+                          <CornerDownLeftIcon className="action-arrow" />
+                        </button>
+                        <button className="secondary-action">
+                          <span>Copy path</span>
+                          <span className="shortcut-cluster">⌘ ⇧ C</span>
+                        </button>
+                      </div>
+                    </aside>
+                  )}
+                </div>
+
+                <footer className="footer-bar">
+                  <div className="footer-group left">
+                    <div className="footer-split">
+                      <kbd className="footer-key"><ArrowUpIcon className="footer-icon" /></kbd>
+                      <kbd className="footer-key"><ArrowDownIcon className="footer-icon" /></kbd>
+                      <span>Navigate</span>
+                    </div>
+                    <div className="footer-split">
+                      <kbd className="footer-key">↵</kbd>
+                      <span>Open</span>
+                    </div>
+                  </div>
+
+                  <div className="footer-group right">
+                    <span>Actions</span>
+                    <kbd className="footer-key small">⌘</kbd>
+                    <kbd className="footer-key small">↵</kbd>
+                  </div>
+                </footer>
               </div>
-              <span>Personal workspace</span>
+
+              <div className="bottom-caption">
+                <div className="caption-left">
+                  <span>A little less clicking —</span>
+                  <kbd className="caption-key">⌘ K</kbd>
+                  <span>from anywhere.</span>
+                </div>
+                <span>Personal workspace</span>
+              </div>
+            </div>
+
+            <div className="right-traffic">
+              <div className="sign-post" />
+              <div className="traffic-circle">
+                <span className="traffic-arrow">→</span>
+              </div>
+            </div>
+
+            <div className="taskbar">
+              <div className="taskbar-search">
+                <span className="taskbar-search-icon">⌕</span>
+                <span>Type here to search</span>
+              </div>
+              <div className="taskbar-actions">
+                <span>📁</span>
+                <span>📎</span>
+                <span>📓</span>
+                <span>🧭</span>
+                <span>🖥</span>
+              </div>
+              <div className="taskbar-status">
+                <span>Earnings upcoming</span>
+                <span className="status-icons">◔ ☰ ⏱</span>
+                <span>FRA</span>
+                <span>9:13 AM</span>
+              </div>
             </div>
           </div>
         );

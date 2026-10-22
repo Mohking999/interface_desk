@@ -1,13 +1,24 @@
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+
 #include <windows.h>
 #include <windowsx.h>
 #include <tchar.h>
 #include <vector>
 #include <string>
+#include <cwctype>
 
 struct CommandItem {
+    const wchar_t* section;      // "Suggested" or "Recent"
+    const wchar_t* category;     // "Commands", "Files", "Applications"
     const wchar_t* title;
     const wchar_t* subtitle;
     const wchar_t* shortcut;
+    bool isBadge;
     const wchar_t* icon;
     const wchar_t* previewTitle;
     const wchar_t* previewPath;
@@ -17,417 +28,404 @@ struct CommandItem {
     const wchar_t* primaryAction;
 };
 
-static const std::vector<CommandItem> g_items = {
-    {L"Open Downloads", L"Jump to your downloaded files", L"↵", L"▣", L"Downloads", L"/Users/you/Downloads", L"Folder", L"24 items", L"Today, 10:42", L"Open in Finder"},
-    {L"Create a quick note", L"Capture a thought in a new document", L"⌘ N", L"✎", L"Quick Note", L"/Users/you/Documents/Notes", L"Command", L"Markdown Template", L"Today, 09:15", L"Create Note"},
-    {L"Toggle Do Not Disturb", L"Silence notifications and stay focused", L"System", L"☾", L"Do Not Disturb", L"System Settings / Focus", L"System Toggle", L"Status: Off", L"Yesterday, 22:00", L"Toggle Focus"},
-    {L"Weekly review.md", L"Documents / Notes", L"12m ago", L"≡", L"Weekly review.md", L"/Users/you/Documents/Notes/Weekly review.md", L"Markdown Document", L"4.2 KB", L"12m ago", L"Open Document"},
-    {L"Interface exploration.fig", L"Documents / Design", L"38m ago", L"◌", L"Interface exploration.fig", L"/Users/you/Documents/Design/Interface exploration.fig", L"Figma Design File", L"18.7 MB", L"38m ago", L"Open in Figma"},
-    {L"Terminal", L"Applications / Utilities", L"1h ago", L"⌘", L"Terminal.app", L"/System/Applications/Utilities/Terminal.app", L"Application", L"Version 2.14", L"1h ago", L"Launch Application"},
+static const std::vector<CommandItem> g_allItems = {
+    {L"Suggested", L"Commands", L"Open Downloads", L"Jump to your downloaded files", L"↵", true, L"▣", L"Downloads", L"/Users/you/Downloads", L"Folder", L"24 items", L"Today, 10:42", L"Open in Finder"},
+    {L"Suggested", L"Commands", L"Create a quick note", L"Capture a thought in a new document", L"⌘ N", false, L"✎", L"Quick Note", L"/Users/you/Documents/Notes", L"Command", L"Markdown Template", L"Today, 09:15", L"Create Note"},
+    {L"Suggested", L"Commands", L"Toggle Do Not Disturb", L"Silence notifications and stay focused", L"System", false, L"☾", L"Do Not Disturb", L"System Settings / Focus", L"System Toggle", L"Status: Off", L"Yesterday, 22:00", L"Toggle Focus"},
+    {L"Recent", L"Files", L"Weekly review.md", L"Documents / Notes", L"12m ago", false, L"≡", L"Weekly review.md", L"/Users/you/Documents/Notes/Weekly review.md", L"Markdown Document", L"4.2 KB", L"12m ago", L"Open Document"},
+    {L"Recent", L"Files", L"Interface exploration.fig", L"Documents / Design", L"38m ago", false, L"❖", L"Interface exploration.fig", L"/Users/you/Documents/Design/Interface exploration.fig", L"Figma Design File", L"18.7 MB", L"38m ago", L"Open in Figma"},
+    {L"Recent", L"Applications", L"Terminal", L"Applications / Utilities", L"1h ago", false, L">_", L"Terminal.app", L"/System/Applications/Utilities/Terminal.app", L"Application", L"Version 2.14", L"1h ago", L"Launch Application"},
+};
+
+static const wchar_t* g_tabs[] = { L"All", L"Applications", L"Files", L"Commands" };
+
+struct RenderedRow {
+    int itemIndex; // Index into g_filteredItems
+    RECT bounds;
 };
 
 struct AppState {
     int selectedIndex = 0;
     int hoverIndex = -1;
+    int activeTab = 0;
     bool showPreview = true;
-    bool isDragging = false;
+    std::wstring searchQuery;
+    std::vector<CommandItem> filteredItems;
+    std::vector<RenderedRow> rowHitBoxes;
+    RECT tabHitBoxes[4] = {};
 };
 
 static AppState g_state;
-
 static HWND g_hwnd = nullptr;
+
+// Cached Fonts
+static HFONT g_fontSearch = nullptr;
 static HFONT g_fontTitle = nullptr;
 static HFONT g_fontBody = nullptr;
 static HFONT g_fontSmall = nullptr;
+static HFONT g_fontTinyBold = nullptr;
+static HFONT g_fontPreviewIcon = nullptr;
+
+static bool ContainsCaseInsensitive(const std::wstring& haystack, const std::wstring& needle) {
+    if (needle.empty()) return true;
+    for (size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+        bool match = true;
+        for (size_t j = 0; j < needle.size(); ++j) {
+            if (towlower(haystack[i + j]) != towlower(needle[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+static void RebuildFilteredList() {
+    g_state.filteredItems.clear();
+    const wchar_t* activeTabName = g_tabs[g_state.activeTab];
+
+    for (const auto& item : g_allItems) {
+        bool tabMatch = (g_state.activeTab == 0) || (wcscmp(item.category, activeTabName) == 0);
+        bool searchMatch = ContainsCaseInsensitive(item.title, g_state.searchQuery) ||
+                           ContainsCaseInsensitive(item.subtitle, g_state.searchQuery);
+        if (tabMatch && searchMatch) {
+            g_state.filteredItems.push_back(item);
+        }
+    }
+
+    if (g_state.selectedIndex >= (int)g_state.filteredItems.size()) {
+        g_state.selectedIndex = g_state.filteredItems.empty() ? 0 : (int)g_state.filteredItems.size() - 1;
+    }
+    g_state.hoverIndex = -1;
+}
 
 static void EnsureFonts() {
     if (g_fontTitle != nullptr) return;
 
-    g_fontTitle = CreateFontW(
-        20, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+    g_fontSearch = CreateFontW(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
-    g_fontBody = CreateFontW(
-        14, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+    g_fontTitle = CreateFontW(22, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
-    g_fontSmall = CreateFontW(
-        12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+    g_fontBody = CreateFontW(15, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+    g_fontSmall = CreateFontW(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+    g_fontTinyBold = CreateFontW(11, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+    g_fontPreviewIcon = CreateFontW(28, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Symbol");
 }
 
-static HBRUSH GetBrush(COLORREF c) {
-    return CreateSolidBrush(c);
+static void CleanupFonts() {
+    if (g_fontSearch) DeleteObject(g_fontSearch);
+    if (g_fontTitle) DeleteObject(g_fontTitle);
+    if (g_fontBody) DeleteObject(g_fontBody);
+    if (g_fontSmall) DeleteObject(g_fontSmall);
+    if (g_fontTinyBold) DeleteObject(g_fontTinyBold);
+    if (g_fontPreviewIcon) DeleteObject(g_fontPreviewIcon);
 }
 
-static void DrawRoundedRect(HDC hdc, RECT r, int radius, HBRUSH brush, bool stroke = false, COLORREF strokeColor = 0) {
-    if (radius <= 0) {
-        FillRect(hdc, &r, brush);
-        if (stroke) {
-            HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            HPEN pen = CreatePen(PS_SOLID, 1, strokeColor);
-            HPEN oldPen = (HPEN)SelectObject(hdc, pen);
-            Rectangle(hdc, r.left, r.top, r.right, r.bottom);
-            SelectObject(hdc, oldPen);
-            DeleteObject(pen);
-            SelectObject(hdc, oldBrush);
-        }
-        return;
-    }
+static void FillRoundBox(HDC hdc, RECT r, int radius, COLORREF fill, bool hasBorder = false, COLORREF border = 0) {
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = hasBorder ? CreatePen(PS_SOLID, 1, border) : (HPEN)GetStockObject(NULL_PEN);
 
     HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, brush);
-    HPEN oldPen = (HPEN)SelectObject(hdc, GetStockObject(NULL_PEN));
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+
     RoundRect(hdc, r.left, r.top, r.right, r.bottom, radius, radius);
+
     SelectObject(hdc, oldPen);
     SelectObject(hdc, oldBrush);
 
-    if (stroke) {
-        HBRUSH nullBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        HPEN pen = CreatePen(PS_SOLID, 1, strokeColor);
-        HPEN old = (HPEN)SelectObject(hdc, pen);
-        RoundRect(hdc, r.left, r.top, r.right, r.bottom, radius, radius);
-        SelectObject(hdc, old);
-        DeleteObject(pen);
-        SelectObject(hdc, nullBrush);
-    }
+    if (hasBorder) DeleteObject(pen);
+    DeleteObject(brush);
 }
 
-static void DrawTextCentered(HDC hdc, const wchar_t* text, RECT rc, COLORREF color, HFONT font) {
+static void DrawLine(HDC hdc, int x1, int y1, int x2, int y2, COLORREF color) {
+    HPEN pen = CreatePen(PS_SOLID, 1, color);
+    HPEN old = (HPEN)SelectObject(hdc, pen);
+    MoveToEx(hdc, x1, y1, nullptr);
+    LineTo(hdc, x2, y2);
+    SelectObject(hdc, old);
+    DeleteObject(pen);
+}
+
+static void DrawLabel(HDC hdc, const wchar_t* text, RECT rc, COLORREF color, HFONT font, UINT format = DT_SINGLELINE | DT_LEFT | DT_VCENTER) {
     SetTextColor(hdc, color);
     SetBkMode(hdc, TRANSPARENT);
     HFONT old = (HFONT)SelectObject(hdc, font);
-    DrawTextW(hdc, text, -1, &rc, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    DrawTextW(hdc, text, -1, &rc, format);
     SelectObject(hdc, old);
-}
-
-static void DrawTextLeft(HDC hdc, const wchar_t* text, RECT rc, COLORREF color, HFONT font) {
-    SetTextColor(hdc, color);
-    SetBkMode(hdc, TRANSPARENT);
-    HFONT old = (HFONT)SelectObject(hdc, font);
-    DrawTextW(hdc, text, -1, &rc, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-    SelectObject(hdc, old);
-}
-
-static int ItemHitTest(int x, int y) {
-    RECT rc = { 44, 82, 640, 420 };
-    if (x < rc.left || x >= rc.right || y < rc.top || y >= rc.bottom) return -1;
-
-    int rowHeight = 58;
-    int startY = rc.top;
-    int visibleItems = 6;
-    int index = (y - startY) / rowHeight;
-    if (index < 0 || index >= visibleItems) return -1;
-    return index;
 }
 
 static void PaintWindow(HDC hdc, RECT client) {
-    // Background
-    HBRUSH bgBrush = GetBrush(RGB(17, 17, 17));
+    // 1. Outer Dark Canvas Background
+    HBRUSH bgBrush = CreateSolidBrush(RGB(17, 17, 17));
     FillRect(hdc, &client, bgBrush);
     DeleteObject(bgBrush);
 
-    // Main panel
-    RECT panel = { 60, 30, client.right - 60, client.bottom - 60 };
-    HBRUSH panelBrush = GetBrush(RGB(28, 28, 28));
-    HBRUSH panelBrush2 = GetBrush(RGB(32, 32, 32));
-    HBRUSH borderBrush = GetBrush(RGB(42, 42, 42));
+    // 2. Main Command Palette Card
+    RECT panel = { 40, 24, 864, 528 };
+    FillRoundBox(hdc, panel, 20, RGB(28, 28, 28), true, RGB(46, 46, 46));
 
-    // panel shadow/padding
-    RECT shadow = { panel.left + 4, panel.top + 4, panel.right + 4, panel.bottom + 4 };
-    HBRUSH shadowBrush = GetBrush(RGB(0, 0, 0));
-    FillRect(hdc, &shadow, shadowBrush);
-    DeleteObject(shadowBrush);
+    // 3. Top Search Bar Row
+    RECT searchIconRc = { panel.left + 20, panel.top + 16, panel.left + 44, panel.top + 48 };
+    DrawLabel(hdc, L"⌕", searchIconRc, RGB(122, 122, 122), g_fontTitle, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
-    // border/rounded main split
-    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, panelBrush);
-    HPEN oldPen = (HPEN)SelectObject(hdc, GetStockObject(NULL_PEN));
-    RoundRect(hdc, panel.left, panel.top, panel.right, panel.bottom, 18, 18);
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
+    RECT searchTextRc = { panel.left + 50, panel.top + 16, panel.right - 70, panel.top + 48 };
+    if (g_state.searchQuery.empty()) {
+        DrawLabel(hdc, L"Search apps, files, and commands...", searchTextRc, RGB(115, 115, 115), g_fontSearch);
+    } else {
+        std::wstring displayQuery = g_state.searchQuery + L"|";
+        DrawLabel(hdc, displayQuery.c_str(), searchTextRc, RGB(240, 240, 240), g_fontSearch);
+    }
 
-    // Search box
-    RECT search = { 74, 42, 760, 76 };
-    HBRUSH boxBrush = GetBrush(RGB(38, 38, 38));
-    oldBrush = (HBRUSH)SelectObject(hdc, boxBrush);
-    oldPen = (HPEN)SelectObject(hdc, GetStockObject(NULL_PEN));
-    RoundRect(hdc, search.left, search.top, search.right, search.bottom, 12, 12);
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-    DeleteObject(boxBrush);
+    // ESC Badge
+    RECT escRect = { panel.right - 56, panel.top + 20, panel.right - 20, panel.top + 42 };
+    FillRoundBox(hdc, escRect, 6, RGB(38, 38, 38), true, RGB(54, 54, 54));
+    DrawLabel(hdc, L"esc", escRect, RGB(145, 145, 145), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
-    // Search icon
-    SetTextColor(hdc, RGB(122, 122, 122));
-    SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, g_fontBody);
-    RECT searchIcon = { search.left + 16, search.top + 10, search.left + 40, search.bottom - 8 };
-    DrawTextW(hdc, L"⌕", -1, &searchIcon, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-    SelectObject(hdc, oldFont);
+    // 4. Filter Tabs Row
+    int tabY = panel.top + 56;
+    int tabX = panel.left + 20;
+    int tabWidths[] = { 38, 92, 48, 84 };
 
-    // Search placeholder
-    RECT searchText = { search.left + 48, search.top + 10, search.right - 64, search.bottom - 8 };
-    oldFont = (HFONT)SelectObject(hdc, g_fontBody);
-    SetTextColor(hdc, RGB(115, 115, 115));
-    DrawTextW(hdc, L"Search apps, files, and commands...", -1, &searchText, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-    SelectObject(hdc, oldFont);
-
-    // esc key cap at right
-    RECT escRect = { search.right - 52, search.top + 12, search.right - 18, search.top + 34 };
-    HBRUSH keyBrush = GetBrush(RGB(38, 38, 38));
-    oldBrush = (HBRUSH)SelectObject(hdc, keyBrush);
-    oldPen = (HPEN)SelectObject(hdc, GetStockObject(NULL_PEN));
-    RoundRect(hdc, escRect.left, escRect.top, escRect.right, escRect.bottom, 5, 5);
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-    DeleteObject(keyBrush);
-    RECT escText = { escRect.left + 2, escRect.top + 2, escRect.right - 2, escRect.bottom - 2 };
-    SetTextColor(hdc, RGB(153, 153, 153));
-    DrawTextW(hdc, L"esc", -1, &escText, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-
-    // Tabs row
-    RECT tabsRect = { 74, 80, 760, 110 };
-    int tabStart = tabsRect.left + 6;
-    const wchar_t* tabNames[] = { L"All", L"Applications", L"Files", L"Commands" };
-    int widths[] = { 36, 100, 42, 72 };
     for (int i = 0; i < 4; ++i) {
-        RECT tr = { tabStart, tabsRect.top, tabStart + widths[i], tabsRect.bottom };
-        if (i == 0) {
-            HBRUSH activeTab = GetBrush(RGB(44, 44, 44));
-            oldBrush = (HBRUSH)SelectObject(hdc, activeTab);
-            oldPen = (HPEN)SelectObject(hdc, GetStockObject(NULL_PEN));
-            RoundRect(hdc, tr.left, tr.top + 2, tr.right, tr.bottom, 8, 8);
-            SelectObject(hdc, oldPen);
-            SelectObject(hdc, oldBrush);
-            DeleteObject(activeTab);
+        RECT tr = { tabX, tabY, tabX + tabWidths[i], tabY + 26 };
+        g_state.tabHitBoxes[i] = tr;
+        if (g_state.activeTab == i) {
+            FillRoundBox(hdc, tr, 8, RGB(44, 44, 44), true, RGB(58, 58, 58));
         }
-        RECT txt = { tr.left + 4, tr.top + 4, tr.right - 4, tr.bottom };
-        SetTextColor(hdc, i == 0 ? RGB(244, 244, 244) : RGB(128, 128, 128));
-        oldFont = (HFONT)SelectObject(hdc, g_fontSmall);
-        DrawTextW(hdc, tabNames[i], -1, &txt, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-        SelectObject(hdc, oldFont);
-        tabStart += widths[i] + 7;
+        DrawLabel(hdc, g_tabs[i], tr, g_state.activeTab == i ? RGB(245, 245, 245) : RGB(128, 128, 128),
+            g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        tabX += tabWidths[i] + 8;
     }
 
-    // Switch hint right side
-    RECT switchRect = { tabsRect.right - 110, 86, tabsRect.right - 12, 104 };
-    SetTextColor(hdc, RGB(115, 115, 115));
-    oldFont = (HFONT)SelectObject(hdc, g_fontSmall);
-    DrawTextW(hdc, L"Switch", -1, &switchRect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-    SelectObject(hdc, oldFont);
+    // Switch ⇥ Hint
+    RECT switchTxt = { panel.right - 92, tabY, panel.right - 46, tabY + 26 };
+    DrawLabel(hdc, L"Switch", switchTxt, RGB(115, 115, 115), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
+    RECT tabKey = { panel.right - 40, tabY + 3, panel.right - 20, tabY + 23 };
+    FillRoundBox(hdc, tabKey, 5, RGB(38, 38, 38), true, RGB(54, 54, 54));
+    DrawLabel(hdc, L"⇥", tabKey, RGB(150, 150, 150), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
-    RECT keyBox = { tabsRect.right - 34, 88, tabsRect.right - 16, 105 };
-    HBRUSH kBrush = GetBrush(RGB(38, 38, 38));
-    oldBrush = (HBRUSH)SelectObject(hdc, kBrush);
-    oldPen = (HPEN)SelectObject(hdc, GetStockObject(NULL_PEN));
-    RoundRect(hdc, keyBox.left, keyBox.top, keyBox.right, keyBox.bottom, 5, 5);
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-    DeleteObject(kBrush);
-    RECT kText = { keyBox.left + 2, keyBox.top + 2, keyBox.right - 2, keyBox.bottom - 2 };
-    SetTextColor(hdc, RGB(157, 157, 157));
-    oldFont = (HFONT)SelectObject(hdc, g_fontSmall);
-    DrawTextW(hdc, L"⇥", -1, &kText, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-    SelectObject(hdc, oldFont);
+    // Horizontal divider under tabs
+    int bodyTop = panel.top + 92;
+    int bodyBottom = panel.bottom - 40;
+    DrawLine(hdc, panel.left, bodyTop, panel.right, bodyTop, RGB(42, 42, 42));
 
-    // Content area split
-    RECT content = { 70, 110, 760, 462 };
-    RECT listRect = { 70, 110, 510, 462 };
-    HBRUSH leftArea = GetBrush(RGB(28, 28, 28));
-    FillRect(hdc, &listRect, leftArea);
-    DeleteObject(leftArea);
-
+    // Vertical split divider between List and Preview
+    int splitX = panel.left + 520;
     if (g_state.showPreview) {
-        RECT previewRect = { 510, 110, 760, 462 };
-        HBRUSH prevBrush = GetBrush(RGB(26, 26, 26));
-        FillRect(hdc, &previewRect, prevBrush);
-        DeleteObject(prevBrush);
+        DrawLine(hdc, splitX, bodyTop, splitX, bodyBottom, RGB(42, 42, 42));
     }
 
-    // List items
-    const int startY = 128;
-    const int rowHeight = 58;
-    for (int i = 0; i < (int)g_items.size(); ++i) {
-        RECT itemRect = { 86, startY + i * rowHeight, 494, startY + i * rowHeight + 50 };
-        bool selected = (g_state.selectedIndex == i);
-        bool hovered = (g_state.hoverIndex == i);
-        if (selected || hovered) {
-            HBRUSH listHover = GetBrush(selected ? RGB(237, 237, 237) : RGB(37, 37, 37));
-            oldBrush = (HBRUSH)SelectObject(hdc, listHover);
-            oldPen = (HPEN)SelectObject(hdc, GetStockObject(NULL_PEN));
-            RoundRect(hdc, itemRect.left, itemRect.top, itemRect.right, itemRect.bottom, 12, 12);
-            SelectObject(hdc, oldPen);
-            SelectObject(hdc, oldBrush);
-            DeleteObject(listHover);
+    // 5. Left Column: Sectioned Command & File List
+    g_state.rowHitBoxes.clear();
+    int curY = bodyTop + 12;
+    int listLeft = panel.left + 12;
+    int listRight = (g_state.showPreview ? splitX : panel.right) - 12;
+
+    const wchar_t* sections[] = { L"Suggested", L"Recent" };
+    const wchar_t* sectionRight[] = { L"COMMANDS", L"LAST OPENED" };
+
+    for (int s = 0; s < 2; ++s) {
+        // Check if any filtered items belong to this section
+        bool hasSectionItems = false;
+        for (const auto& item : g_state.filteredItems) {
+            if (wcscmp(item.section, sections[s]) == 0) {
+                hasSectionItems = true;
+                break;
+            }
         }
+        if (!hasSectionItems) continue;
 
-        RECT iconRect = { itemRect.left + 10, itemRect.top + 15, itemRect.left + 32, itemRect.bottom - 15 };
-        SetTextColor(hdc, selected ? RGB(29, 29, 29) : RGB(140, 140, 140));
-        oldFont = (HFONT)SelectObject(hdc, g_fontBody);
-        DrawTextW(hdc, g_items[i].icon, -1, &iconRect, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
-        SelectObject(hdc, oldFont);
+        // Section Header
+        RECT secLeftRc = { listLeft + 10, curY, listLeft + 200, curY + 20 };
+        RECT secRightRc = { listRight - 140, curY, listRight - 10, curY + 20 };
+        DrawLabel(hdc, sections[s], secLeftRc, RGB(117, 117, 117), g_fontSmall);
+        DrawLabel(hdc, sectionRight[s], secRightRc, RGB(105, 105, 105), g_fontTinyBold, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
+        curY += 24;
 
-        RECT titleRect = { itemRect.left + 44, itemRect.top + 8, itemRect.right - 70, itemRect.top + 24 };
-        SetTextColor(hdc, selected ? RGB(20, 20, 20) : RGB(237, 237, 237));
-        oldFont = (HFONT)SelectObject(hdc, g_fontBody);
-        DrawTextW(hdc, g_items[i].title, -1, &titleRect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-        SelectObject(hdc, oldFont);
+        // Render items in this section
+        for (int i = 0; i < (int)g_state.filteredItems.size(); ++i) {
+            const auto& item = g_state.filteredItems[i];
+            if (wcscmp(item.section, sections[s]) != 0) continue;
 
-        RECT subRect = { itemRect.left + 44, itemRect.top + 28, itemRect.right - 70, itemRect.bottom - 8 };
-        SetTextColor(hdc, selected ? RGB(90, 90, 90) : RGB(120, 120, 120));
-        oldFont = (HFONT)SelectObject(hdc, g_fontSmall);
-        DrawTextW(hdc, g_items[i].subtitle, -1, &subRect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-        SelectObject(hdc, oldFont);
+            RECT rowRc = { listLeft, curY, listRight, curY + 50 };
+            g_state.rowHitBoxes.push_back({ i, rowRc });
 
-        RECT badgeRect = { itemRect.right - 62, itemRect.top + 13, itemRect.right - 12, itemRect.top + 35 };
-        HBRUSH badgeBrush = GetBrush(selected ? RGB(217, 217, 217) : RGB(38, 38, 38));
-        oldBrush = (HBRUSH)SelectObject(hdc, badgeBrush);
-        oldPen = (HPEN)SelectObject(hdc, GetStockObject(NULL_PEN));
-        RoundRect(hdc, badgeRect.left, badgeRect.top, badgeRect.right, badgeRect.bottom, 5, 5);
-        SelectObject(hdc, oldPen);
-        SelectObject(hdc, oldBrush);
-        DeleteObject(badgeBrush);
+            bool selected = (g_state.selectedIndex == i);
+            bool hovered = (g_state.hoverIndex == i);
 
-        RECT badgeText = { badgeRect.left + 2, badgeRect.top + 2, badgeRect.right - 2, badgeRect.bottom - 2 };
-        SetTextColor(hdc, selected ? RGB(51, 51, 51) : RGB(138, 138, 138));
-        oldFont = (HFONT)SelectObject(hdc, g_fontSmall);
-        DrawTextW(hdc, g_items[i].shortcut, -1, &badgeText, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-        SelectObject(hdc, oldFont);
+            if (selected) {
+                FillRoundBox(hdc, rowRc, 12, RGB(237, 237, 237));
+            } else if (hovered) {
+                FillRoundBox(hdc, rowRc, 12, RGB(38, 38, 38));
+            }
+
+            // Icon
+            RECT iconRc = { rowRc.left + 12, rowRc.top, rowRc.left + 38, rowRc.bottom };
+            DrawLabel(hdc, item.icon, iconRc, selected ? RGB(24, 24, 24) : RGB(145, 145, 145),
+                g_fontBody, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
+            // Title & Subtitle
+            RECT titleRc = { rowRc.left + 46, rowRc.top + 7, rowRc.right - 80, rowRc.top + 26 };
+            DrawLabel(hdc, item.title, titleRc, selected ? RGB(20, 20, 20) : RGB(237, 237, 237), g_fontBody);
+
+            RECT subRc = { rowRc.left + 46, rowRc.top + 26, rowRc.right - 80, rowRc.bottom - 6 };
+            DrawLabel(hdc, item.subtitle, subRc, selected ? RGB(90, 90, 90) : RGB(120, 120, 120), g_fontSmall);
+
+            // Right label or keycap badge
+            if (item.isBadge) {
+                RECT badgeRc = { rowRc.right - 36, rowRc.top + 14, rowRc.right - 12, rowRc.bottom - 14 };
+                FillRoundBox(hdc, badgeRc, 6, selected ? RGB(218, 218, 218) : RGB(38, 38, 38),
+                    true, selected ? RGB(195, 195, 195) : RGB(54, 54, 54));
+                DrawLabel(hdc, item.shortcut, badgeRc, selected ? RGB(45, 45, 45) : RGB(140, 140, 140),
+                    g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            } else {
+                RECT rightLblRc = { rowRc.right - 90, rowRc.top, rowRc.right - 12, rowRc.bottom };
+                DrawLabel(hdc, item.shortcut, rightLblRc, selected ? RGB(85, 85, 85) : RGB(115, 115, 115),
+                    g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
+            }
+
+            curY += 52;
+        }
+        curY += 8; // Gap between sections
     }
 
-    // Preview pane
-    if (g_state.showPreview) {
-        RECT pv = { 526, 124, 744, 418 };
+    // 6. Right Column: Contextual Preview Pane
+    if (g_state.showPreview && !g_state.filteredItems.empty()) {
+        const auto& sel = g_state.filteredItems[g_state.selectedIndex];
+        int pvLeft = splitX + 20;
+        int pvRight = panel.right - 20;
+        int pvTop = bodyTop + 14;
 
-        // Preview icon square
-        RECT iconBox = { pv.left + 6, pv.top + 12, pv.left + 82, pv.top + 88 };
-        HBRUSH iconBrush = GetBrush(RGB(36, 36, 36));
-        oldBrush = (HBRUSH)SelectObject(hdc, iconBrush);
-        oldPen = (HPEN)SelectObject(hdc, GetStockObject(NULL_PEN));
-        RoundRect(hdc, iconBox.left, iconBox.top, iconBox.right, iconBox.bottom, 18, 18);
-        SelectObject(hdc, oldPen);
-        SelectObject(hdc, oldBrush);
-        DeleteObject(iconBrush);
+        // Preview header
+        RECT pvHeaderRc = { pvLeft, pvTop, pvRight, pvTop + 20 };
+        DrawLabel(hdc, L"Preview", pvHeaderRc, RGB(120, 120, 120), g_fontSmall);
+        DrawLabel(hdc, L"◧", pvHeaderRc, RGB(120, 120, 120), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
 
-        RECT iconTxt = { iconBox.left, iconBox.top, iconBox.right, iconBox.bottom };
-        SetTextColor(hdc, RGB(212, 212, 212));
-        oldFont = (HFONT)SelectObject(hdc, g_fontTitle);
-        DrawTextW(hdc, g_items[g_state.selectedIndex].icon, -1, &iconTxt, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-        SelectObject(hdc, oldFont);
+        // Large Rounded Icon Box
+        RECT iconBox = { pvLeft, pvTop + 30, pvLeft + 72, pvTop + 102 };
+        FillRoundBox(hdc, iconBox, 16, RGB(36, 36, 36), true, RGB(48, 48, 48));
+        DrawLabel(hdc, sel.icon, iconBox, RGB(220, 220, 220), g_fontPreviewIcon, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
-        RECT titleRect = { pv.left + 2, pv.top + 98, pv.right - 6, pv.top + 132 };
-        SetTextColor(hdc, RGB(245, 245, 245));
-        oldFont = (HFONT)SelectObject(hdc, g_fontTitle);
-        DrawTextW(hdc, g_items[g_state.selectedIndex].previewTitle, -1, &titleRect, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
-        SelectObject(hdc, oldFont);
+        // Preview Title & Path
+        RECT pvTitleRc = { pvLeft, pvTop + 114, pvRight, pvTop + 142 };
+        DrawLabel(hdc, sel.previewTitle, pvTitleRc, RGB(245, 245, 245), g_fontTitle);
 
-        RECT pathRect = { pv.left + 2, pv.top + 130, pv.right - 6, pv.top + 156 };
-        SetTextColor(hdc, RGB(115, 115, 115));
-        oldFont = (HFONT)SelectObject(hdc, g_fontSmall);
-        DrawTextW(hdc, g_items[g_state.selectedIndex].previewPath, -1, &pathRect, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
-        SelectObject(hdc, oldFont);
+        RECT pvPathRc = { pvLeft, pvTop + 142, pvRight, pvTop + 162 };
+        DrawLabel(hdc, sel.previewPath, pvPathRc, RGB(115, 115, 115), g_fontSmall);
 
-        // Metadata rows
-        RECT metabox = { pv.left + 4, pv.top + 170, pv.right - 4, pv.top + 278 };
-        HBRUSH metaBrush = GetBrush(RGB(26, 26, 26));
-        FillRect(hdc, &metabox, metaBrush);
-        DeleteObject(metaBrush);
+        // Key-Value Metadata Rows
+        const wchar_t* metaLabels[] = { L"Kind", L"Contents", L"Last opened" };
+        const wchar_t* metaValues[] = { sel.kind, sel.contents, sel.lastOpened };
+        int metaY = pvTop + 178;
 
-        const wchar_t* labels[] = { L"Kind", L"Contents", L"Last opened" };
-        const wchar_t* values[] = {
-            g_items[g_state.selectedIndex].kind,
-            g_items[g_state.selectedIndex].contents,
-            g_items[g_state.selectedIndex].lastOpened
-        };
         for (int i = 0; i < 3; ++i) {
-            RECT row = { pv.left + 6, pv.top + 180 + i * 26, pv.right - 8, pv.top + 203 + i * 26 };
-            RECT lbl = { row.left, row.top, row.right - 90, row.bottom };
-            RECT val = { row.right - 130, row.top, row.right - 4, row.bottom };
-            SetTextColor(hdc, RGB(115, 115, 115));
-            oldFont = (HFONT)SelectObject(hdc, g_fontSmall);
-            DrawTextW(hdc, labels[i], -1, &lbl, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
-            SetTextColor(hdc, RGB(212, 212, 212));
-            DrawTextW(hdc, values[i], -1, &val, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
-            SelectObject(hdc, oldFont);
+            RECT rowRc = { pvLeft, metaY + i * 24, pvRight, metaY + (i + 1) * 24 };
+            DrawLabel(hdc, metaLabels[i], rowRc, RGB(115, 115, 115), g_fontSmall, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+            DrawLabel(hdc, metaValues[i], rowRc, RGB(212, 212, 212), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
         }
 
-        // Buttons
-        RECT mainBtn = { pv.left + 4, pv.top + 305, pv.right - 4, pv.top + 342 };
-        HBRUSH actionBrush = GetBrush(RGB(42, 42, 42));
-        oldBrush = (HBRUSH)SelectObject(hdc, actionBrush);
-        oldPen = (HPEN)SelectObject(hdc, GetStockObject(NULL_PEN));
-        RoundRect(hdc, mainBtn.left, mainBtn.top, mainBtn.right, mainBtn.bottom, 10, 10);
-        SelectObject(hdc, oldPen);
-        SelectObject(hdc, oldBrush);
-        DeleteObject(actionBrush);
+        // Divider above action buttons
+        int actionTop = pvTop + 266;
+        DrawLine(hdc, pvLeft, actionTop, pvRight, actionTop, RGB(42, 42, 42));
 
-        RECT mainLabel = { mainBtn.left + 12, mainBtn.top + 8, mainBtn.right - 28, mainBtn.bottom - 8 };
-        SetTextColor(hdc, RGB(255, 255, 255));
-        oldFont = (HFONT)SelectObject(hdc, g_fontSmall);
-        DrawTextW(hdc, g_items[g_state.selectedIndex].primaryAction, -1, &mainLabel, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
-        SelectObject(hdc, oldFont);
+        // Primary Action Button
+        RECT mainBtn = { pvLeft, actionTop + 14, pvRight, actionTop + 50 };
+        FillRoundBox(hdc, mainBtn, 10, RGB(42, 42, 42), true, RGB(54, 54, 54));
 
-        // action arrow
-        RECT arrowRect = { mainBtn.right - 26, mainBtn.top + 12, mainBtn.right - 10, mainBtn.bottom - 10 };
-        SetTextColor(hdc, RGB(153, 153, 153));
-        oldFont = (HFONT)SelectObject(hdc, g_fontSmall);
-        DrawTextW(hdc, L"↵", -1, &arrowRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-        SelectObject(hdc, oldFont);
+        RECT mainBtnText = { mainBtn.left + 14, mainBtn.top, mainBtn.right - 34, mainBtn.bottom };
+        DrawLabel(hdc, sel.primaryAction, mainBtnText, RGB(245, 245, 245), g_fontSmall);
 
-        RECT copyBtn = { pv.left + 4, pv.top + 348, pv.right - 4, pv.top + 378 };
-        SetTextColor(hdc, RGB(138, 138, 138));
-        oldFont = (HFONT)SelectObject(hdc, g_fontSmall);
-        DrawTextW(hdc, L"Copy path", -1, &copyBtn, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
-        SelectObject(hdc, oldFont);
-        RECT copyKey = { pv.right - 72, pv.top + 352, pv.right - 10, pv.top + 374 };
-        DrawTextW(hdc, L"⌘ ⇧ C", -1, &copyKey, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        RECT mainBtnKey = { mainBtn.right - 30, mainBtn.top, mainBtn.right - 10, mainBtn.bottom };
+        DrawLabel(hdc, L"↵", mainBtnKey, RGB(155, 155, 155), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
+        // Secondary Action ("Copy path")
+        RECT copyRow = { pvLeft + 14, actionTop + 56, pvRight - 10, actionTop + 82 };
+        DrawLabel(hdc, L"Copy path", copyRow, RGB(138, 138, 138), g_fontSmall);
+        DrawLabel(hdc, L"⌘ ⇧ C", copyRow, RGB(110, 110, 110), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
     }
 
-    // Footer bar
-    RECT footer = { 70, 462, 760, 496 };
-    HBRUSH footerBrush = GetBrush(RGB(24, 24, 24));
-    FillRect(hdc, &footer, footerBrush);
-    DeleteObject(footerBrush);
+    // 7. Footer Bar inside Card
+    DrawLine(hdc, panel.left, bodyBottom, panel.right, bodyBottom, RGB(42, 42, 42));
 
-    RECT footerLeft = { 84, 468, 250, 490 };
-    SetTextColor(hdc, RGB(120, 120, 120));
-    oldFont = (HFONT)SelectObject(hdc, g_fontSmall);
-    DrawTextW(hdc, L"Navigate", -1, &footerLeft, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
-    SelectObject(hdc, oldFont);
+    int fY = bodyBottom + 9;
+    RECT upKey = { panel.left + 20, fY, panel.left + 40, fY + 22 };
+    RECT downKey = { panel.left + 44, fY, panel.left + 64, fY + 22 };
+    FillRoundBox(hdc, upKey, 5, RGB(37, 37, 37), true, RGB(52, 52, 52));
+    FillRoundBox(hdc, downKey, 5, RGB(37, 37, 37), true, RGB(52, 52, 52));
+    DrawLabel(hdc, L"↑", upKey, RGB(150, 150, 150), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    DrawLabel(hdc, L"↓", downKey, RGB(150, 150, 150), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
-    RECT footerRight = { 610, 468, 760, 490 };
-    SetTextColor(hdc, RGB(120, 120, 120));
-    DrawTextW(hdc, L"Actions", -1, &footerRight, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+    RECT navText = { panel.left + 72, fY, panel.left + 135, fY + 22 };
+    DrawLabel(hdc, L"Navigate", navText, RGB(120, 120, 120), g_fontSmall);
 
-    // Bottom caption
-    RECT caption = { 70, 500, 760, 532 };
-    SetTextColor(hdc, RGB(115, 115, 115));
-    oldFont = (HFONT)SelectObject(hdc, g_fontSmall);
-    DrawTextW(hdc, L"A little less clicking —", -1, &caption, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
-    SelectObject(hdc, oldFont);
+    RECT enterKey = { panel.left + 145, fY, panel.left + 167, fY + 22 };
+    FillRoundBox(hdc, enterKey, 5, RGB(37, 37, 37), true, RGB(52, 52, 52));
+    DrawLabel(hdc, L"↵", enterKey, RGB(150, 150, 150), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
-    RECT kcap = { 238, 502, 280, 530 };
-    HBRUSH keycapBrush = GetBrush(RGB(34, 34, 34));
-    oldBrush = (HBRUSH)SelectObject(hdc, keycapBrush);
-    oldPen = (HPEN)SelectObject(hdc, GetStockObject(NULL_PEN));
-    RoundRect(hdc, kcap.left, kcap.top, kcap.right, kcap.bottom, 5, 5);
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-    DeleteObject(keycapBrush);
-    RECT kcapText = { kcap.left, kcap.top, kcap.right, kcap.bottom };
-    SetTextColor(hdc, RGB(176, 176, 176));
-    oldFont = (HFONT)SelectObject(hdc, g_fontSmall);
-    DrawTextW(hdc, L"⌘ K", -1, &kcapText, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-    SelectObject(hdc, oldFont);
+    RECT openText = { panel.left + 175, fY, panel.left + 230, fY + 22 };
+    DrawLabel(hdc, L"Open", openText, RGB(120, 120, 120), g_fontSmall);
 
-    RECT captionEnd = { 300, 500, 530, 532 };
-    DrawTextW(hdc, L"from anywhere.", -1, &captionEnd, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
-    RECT workspace = { 640, 500, 760, 532 };
-    DrawTextW(hdc, L"Personal workspace", -1, &workspace, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+    // Right side of footer: Actions ⌘ ↵
+    RECT actText = { panel.right - 120, fY, panel.right - 70, fY + 22 };
+    DrawLabel(hdc, L"Actions", actText, RGB(120, 120, 120), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
+
+    RECT cmdKey = { panel.right - 64, fY, panel.right - 44, fY + 22 };
+    RECT retKey = { panel.right - 40, fY, panel.right - 20, fY + 22 };
+    FillRoundBox(hdc, cmdKey, 5, RGB(37, 37, 37), true, RGB(52, 52, 52));
+    FillRoundBox(hdc, retKey, 5, RGB(37, 37, 37), true, RGB(52, 52, 52));
+    DrawLabel(hdc, L"⌘", cmdKey, RGB(150, 150, 150), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    DrawLabel(hdc, L"↵", retKey, RGB(150, 150, 150), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
+    // 8. Bottom Presentation Caption (Outside Card)
+    int capY = panel.bottom + 14;
+    RECT capLeft = { panel.left + 4, capY, panel.left + 145, capY + 24 };
+    DrawLabel(hdc, L"A little less clicking —", capLeft, RGB(115, 115, 115), g_fontSmall);
+
+    RECT kCap = { panel.left + 148, capY + 1, panel.left + 184, capY + 23 };
+    FillRoundBox(hdc, kCap, 5, RGB(34, 34, 34), true, RGB(51, 51, 51));
+    DrawLabel(hdc, L"⌘ K", kCap, RGB(176, 176, 176), g_fontSmall, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
+    RECT capAfter = { panel.left + 192, capY, panel.left + 320, capY + 24 };
+    DrawLabel(hdc, L"from anywhere.", capAfter, RGB(115, 115, 115), g_fontSmall);
+
+    RECT capRight = { panel.right - 160, capY, panel.right - 4, capY + 24 };
+    DrawLabel(hdc, L"Personal workspace", capRight, RGB(115, 115, 115), g_fontSmall, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
+}
+
+static int HitTestRow(int x, int y) {
+    POINT pt = { x, y };
+    for (const auto& row : g_state.rowHitBoxes) {
+        if (PtInRect(&row.bounds, pt)) {
+            return row.itemIndex;
+        }
+    }
+    return -1;
+}
+
+static int HitTestTab(int x, int y) {
+    POINT pt = { x, y };
+    for (int i = 0; i < 4; ++i) {
+        if (PtInRect(&g_state.tabHitBoxes[i], pt)) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -435,12 +433,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CREATE:
         g_hwnd = hwnd;
         EnsureFonts();
+        RebuildFilteredList();
         return 0;
+
+    case WM_ERASEBKGND:
+        // Prevent background erase to eliminate flickering
+        return 1;
 
     case WM_PAINT: {
         PAINTSTRUCT ps;
-        BeginPaint(hwnd, &ps);
-        PaintWindow(ps.hdc, ps.rcPaint);
+        HDC hdc = BeginPaint(hwnd, &ps);
+
+        RECT client;
+        GetClientRect(hwnd, &client);
+        int width = client.right - client.left;
+        int height = client.bottom - client.top;
+
+        // Off-screen double buffer
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP memBmp = CreateCompatibleBitmap(hdc, width, height);
+        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
+
+        PaintWindow(memDC, client);
+
+        BitBlt(hdc, 0, 0, width, height, memDC, 0, 0, SRCCOPY);
+
+        SelectObject(memDC, oldBmp);
+        DeleteObject(memBmp);
+        DeleteDC(memDC);
+
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -448,46 +469,82 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_MOUSEMOVE: {
         int x = GET_X_LPARAM(lParam);
         int y = GET_Y_LPARAM(lParam);
-        int idx = ItemHitTest(x, y);
-        if (idx != -1) {
+        int idx = HitTestRow(x, y);
+        if (idx != g_state.hoverIndex) {
             g_state.hoverIndex = idx;
-        } else {
-            g_state.hoverIndex = -1;
+            InvalidateRect(hwnd, nullptr, FALSE);
         }
-        InvalidateRect(hwnd, nullptr, TRUE);
         return 0;
     }
 
     case WM_LBUTTONDOWN: {
         int x = GET_X_LPARAM(lParam);
         int y = GET_Y_LPARAM(lParam);
-        int idx = ItemHitTest(x, y);
-        if (idx >= 0) {
-            g_state.selectedIndex = idx;
-            InvalidateRect(hwnd, nullptr, TRUE);
+
+        int tabIdx = HitTestTab(x, y);
+        if (tabIdx != -1 && tabIdx != g_state.activeTab) {
+            g_state.activeTab = tabIdx;
+            RebuildFilteredList();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+
+        int rowIdx = HitTestRow(x, y);
+        if (rowIdx >= 0 && rowIdx != g_state.selectedIndex) {
+            g_state.selectedIndex = rowIdx;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+
+    case WM_CHAR: {
+        if (wParam == VK_BACK) {
+            if (!g_state.searchQuery.empty()) {
+                g_state.searchQuery.pop_back();
+                RebuildFilteredList();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        } else if (wParam >= 32 && wParam != 127) {
+            g_state.searchQuery.push_back((wchar_t)wParam);
+            RebuildFilteredList();
+            InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
     }
 
     case WM_KEYDOWN:
-        if (wParam == VK_UP) {
-            g_state.selectedIndex = (g_state.selectedIndex - 1 + (int)g_items.size()) % (int)g_items.size();
-            InvalidateRect(hwnd, nullptr, TRUE);
+        if (wParam == VK_UP && !g_state.filteredItems.empty()) {
+            int n = (int)g_state.filteredItems.size();
+            g_state.selectedIndex = (g_state.selectedIndex - 1 + n) % n;
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
-        if (wParam == VK_DOWN) {
-            g_state.selectedIndex = (g_state.selectedIndex + 1) % (int)g_items.size();
-            InvalidateRect(hwnd, nullptr, TRUE);
+        if (wParam == VK_DOWN && !g_state.filteredItems.empty()) {
+            int n = (int)g_state.filteredItems.size();
+            g_state.selectedIndex = (g_state.selectedIndex + 1) % n;
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         if (wParam == VK_TAB) {
-            g_state.selectedIndex = (g_state.selectedIndex + 1) % (int)g_items.size();
-            InvalidateRect(hwnd, nullptr, TRUE);
+            g_state.activeTab = (g_state.activeTab + 1) % 4;
+            RebuildFilteredList();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        if (wParam == VK_ESCAPE) {
+            if (!g_state.searchQuery.empty()) {
+                g_state.searchQuery.clear();
+                RebuildFilteredList();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            } else {
+                PostQuitMessage(0);
+            }
             return 0;
         }
         break;
 
     case WM_DESTROY:
+        CleanupFonts();
         PostQuitMessage(0);
         return 0;
     }
@@ -498,21 +555,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE, LPTSTR, int nCmdShow) {
     const wchar_t CLASS_NAME[] = L"CommandPaletteWin32";
 
-    WNDCLASSEX wc = {};
-    wc.cbSize = sizeof(WNDCLASSEX);
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(WNDCLASSEXW);
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.hbrBackground = nullptr; // Handled via double-buffering in WM_PAINT
     wc.lpszClassName = CLASS_NAME;
-    RegisterClassEx(&wc);
+    RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowEx(
+    // Calculate exact window size so client area is 904x580
+    RECT desiredClient = { 0, 0, 904, 580 };
+    AdjustWindowRectEx(&desiredClient, WS_OVERLAPPEDWINDOW, FALSE, 0);
+
+    HWND hwnd = CreateWindowExW(
         0,
         CLASS_NAME,
         L"Command Palette",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 920, 620,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        desiredClient.right - desiredClient.left,
+        desiredClient.bottom - desiredClient.top,
         nullptr, nullptr, hInstance, nullptr);
 
     if (!hwnd) return 0;
